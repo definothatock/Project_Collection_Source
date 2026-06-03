@@ -20,7 +20,7 @@ void UDragComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorC
 
 	if (State == EDragState::Dragging)
 	{
-		UpdateDrag(DeltaTime);
+		Auth_UpdateDrag(DeltaTime);
 	}
 }
 
@@ -33,36 +33,39 @@ void UDragComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLi
 }
 
 
-bool UDragComponent::TryStartDrag()
+void UDragComponent::Request_StartDrag()
 {
 	FVector ViewLoc, ViewDir;
-	if (!GetViewPoint(ViewLoc, ViewDir))
+	if (!GetOwnerViewPoint(ViewLoc, ViewDir))
 	{
-		return false;
+		return;
+	}
+	
+
+	// Client RPC
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		RpcServer_TryStartDrag(ViewLoc, ViewDir);
+		return;
 	}
 
 	// Is Server 
-	if (GetOwner() && GetOwner()->HasAuthority())
-	{
-		StopDrag(); // clean on authority
-		return TryStartDragFromView(ViewLoc, ViewDir);
-	}
+	Request_StopDrag(); // clean existing drag
+	Auth_TryStartDrag(ViewLoc, ViewDir);
 
-	// Client RPC
-	ServerTryStartDrag(ViewLoc, ViewDir);
-	return true; // request sent
 }
 
 
-void UDragComponent::StopDrag()
+void UDragComponent::Request_StopDrag()
 {
 	// Client RPC
 	if (!GetOwner() || !GetOwner()->HasAuthority())
 	{
-		ServerStopDrag();
+		RpcServer_StopDrag();
 		return;
 	}
-	
+
+	// Is Server 
 	Grabbed = nullptr;
 	GrabbedBone = NAME_None;
 	State = EDragState::Undrag;
@@ -72,7 +75,7 @@ void UDragComponent::StopDrag()
 // ==================== Internal ==================== 
 
 
-bool UDragComponent::GetViewPoint(FVector& OutLocation, FVector& OutDirection) const
+bool UDragComponent::GetOwnerViewPoint(FVector& OutLocation, FVector& OutDirection) const
 {
 	if (const APawn* Pawn = Cast<APawn>(GetOwner()))
 	{
@@ -98,20 +101,20 @@ bool UDragComponent::GetViewPoint(FVector& OutLocation, FVector& OutDirection) c
 }
 
 
-void UDragComponent::UpdateDrag(float /*DeltaTime*/)
+void UDragComponent::Auth_UpdateDrag(float /*DeltaTime*/)
 { // commented param means unused for now (kept to match Tick-style signature / future time-based use).
 
 	// Failure Cases
 	UPrimitiveComponent* Comp = Grabbed.Get();
 	if (!Comp || !Comp->IsSimulatingPhysics(GrabbedBone))
 	{
-		StopDrag();
+		Request_StopDrag();
 		return;
 	}
 	FVector ViewLoc, ViewDir;
-	if (!GetViewPoint(ViewLoc, ViewDir))
+	if (!GetOwnerViewPoint(ViewLoc, ViewDir))
 	{
-		StopDrag();
+		Request_StopDrag();
 		return;
 	}
 	
@@ -125,7 +128,7 @@ void UDragComponent::UpdateDrag(float /*DeltaTime*/)
 	// Release if the body can't keep up (too heavy / obstructed / yanked too hard).
 	if (Error.SizeSquared() > FMath::Square(ReleaseDistance))
 	{
-		StopDrag();
+		Request_StopDrag();
 		return;
 	}
 
@@ -188,7 +191,7 @@ void UDragComponent::UpdateDrag(float /*DeltaTime*/)
 }
 
 
-bool UDragComponent::TryStartDragFromView(const FVector& ViewLoc, const FVector& ViewDir)
+bool UDragComponent::Auth_TryStartDrag(const FVector& ViewLoc, const FVector& ViewDir)
 {
 	// Failure cases
 	
@@ -229,15 +232,15 @@ bool UDragComponent::TryStartDragFromView(const FVector& ViewLoc, const FVector&
 }
 
 
-void UDragComponent::ServerTryStartDrag_Implementation(FVector_NetQuantize ViewLoc, FVector_NetQuantizeNormal ViewDir)
+void UDragComponent::RpcServer_TryStartDrag_Implementation(FVector_NetQuantize ViewLoc, FVector_NetQuantizeNormal ViewDir)
 {
-	StopDrag();
-	TryStartDragFromView(ViewLoc, ViewDir);
+	Request_StopDrag();
+	Auth_TryStartDrag(ViewLoc, ViewDir);
 }
 
 
-void UDragComponent::ServerStopDrag_Implementation()
+void UDragComponent::RpcServer_StopDrag_Implementation()
 {
-	StopDrag();
+	Request_StopDrag();
 }
 

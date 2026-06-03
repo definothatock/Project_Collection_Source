@@ -66,13 +66,10 @@ public:
 
 	// Trace from the current view and try to grab whatever physics body is hit.
 	UFUNCTION(BlueprintCallable, Category = "Drag")
-	bool TryStartDrag();
+	void Request_StartDrag();
 
 	UFUNCTION(BlueprintCallable, Category = "Drag")
-	void StopDrag();
-
-	UFUNCTION(BlueprintPure, Category = "Drag")
-	bool IsDragging() const { return State == EDragState::Dragging; }
+	void Request_StopDrag();
 	
 	// ==================== Configs ==================== 
 
@@ -111,24 +108,27 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Debug")
 	bool bEnableAngularDamping = true;
 	
-	// ==================== Queries ==================== 
+	// ==================== Queries ====================
+	
+	UFUNCTION(BlueprintPure, Category = "Drag")
+	bool IsDragging() const { return State == EDragState::Dragging; }
 
 	// ==================== Internal functions ==================== 
 
 protected:
 	// Resolve the "desired View point": view location + direction.
-	bool GetViewPoint(FVector& OutLocation, FVector& OutDirection) const;
+	bool GetOwnerViewPoint(FVector& OutLocation, FVector& OutDirection) const;
 
 private:
-	void UpdateDrag(float DeltaTime);
+	void Auth_UpdateDrag(float DeltaTime);
 
-	bool TryStartDragFromView(const FVector& ViewLoc, const FVector& ViewDir);
-
-	UFUNCTION(Server, Reliable)
-	void ServerTryStartDrag(FVector_NetQuantize ViewLoc, FVector_NetQuantizeNormal ViewDir);
+	bool Auth_TryStartDrag(const FVector& ViewLoc, const FVector& ViewDir);
 
 	UFUNCTION(Server, Reliable)
-	void ServerStopDrag();
+	void RpcServer_TryStartDrag(FVector_NetQuantize ViewLoc, FVector_NetQuantizeNormal ViewDir);
+
+	UFUNCTION(Server, Reliable)
+	void RpcServer_StopDrag();
 
 
 	// ==================== Internal Variables ====================
