@@ -41,7 +41,12 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
  *
  * Boundary:
  * Physical manipulation, not "pickup".
- * For Configs only Strength cant be adjusted independently. 
+ * For Configs only Strength cant be adjusted independently.
+ *
+ * Networking:
+ * Ser-Auth Force Application.
+ * Replicates: 
+ * 
  */
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class PROJECT_COLLECTION_API UDragComponent : public UActorComponent
@@ -53,7 +58,9 @@ public:
 	UDragComponent();
 	
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType,
-	                           FActorComponentTickFunction* ThisTickFunction) override;
+							   FActorComponentTickFunction* ThisTickFunction) override;
+
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	// ==================== APIs ====================
 
@@ -115,6 +122,14 @@ protected:
 private:
 	void UpdateDrag(float DeltaTime);
 
+	bool TryStartDragFromView(const FVector& ViewLoc, const FVector& ViewDir);
+
+	UFUNCTION(Server, Reliable)
+	void ServerTryStartDrag(FVector_NetQuantize ViewLoc, FVector_NetQuantizeNormal ViewDir);
+
+	UFUNCTION(Server, Reliable)
+	void ServerStopDrag();
+
 
 	// ==================== Internal Variables ====================
 
@@ -124,7 +139,7 @@ public:
 	FName GrabbedBone = NAME_None;
 	
 private:
-	UPROPERTY(Transient)
+	UPROPERTY(Transient, Replicated)
 	EDragState State = EDragState::Undrag;
 	
 	// Grab point stored in the body's local space so it tracks rotation.

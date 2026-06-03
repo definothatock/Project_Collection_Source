@@ -2,11 +2,12 @@
 
 
 #include "Core/Utili/DragComponent.h"
-
+#include "Net/UnrealNetwork.h"
 
 UDragComponent::UDragComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
+	SetIsReplicatedByDefault(true);
 }
 
 
@@ -14,53 +15,54 @@ void UDragComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorC
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{return;}
+
 	if (State == EDragState::Dragging)
 	{
 		UpdateDrag(DeltaTime);
 	}
 }
 
+
+void UDragComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME(UDragComponent, State);
+}
+
+
 bool UDragComponent::TryStartDrag()
 {
-	StopDrag(); // clean
-
 	FVector ViewLoc, ViewDir;
 	if (!GetViewPoint(ViewLoc, ViewDir))
 	{
 		return false;
 	}
 
-	const FVector TraceEnd = ViewLoc + ViewDir * MaxGrabDistance;
-
-	FCollisionQueryParams Params(SCENE_QUERY_STAT(DragTrace), true, GetOwner());
-	FHitResult Hit;
-	const bool bHit = GetWorld()->LineTraceSingleByChannel(
-		Hit, ViewLoc, TraceEnd, TraceChannel, Params);
-
-	if (!bHit)
+	// Is Server 
+	if (GetOwner() && GetOwner()->HasAuthority())
 	{
-		return false;
+		StopDrag(); // clean on authority
+		return TryStartDragFromView(ViewLoc, ViewDir);
 	}
 
-	UPrimitiveComponent* Comp = Hit.GetComponent();
-	// Not a physics body.
-	if (!Comp || !Comp->IsSimulatingPhysics(Hit.BoneName))
-	{return false;}
-
-	// Cache grab info. Store the contact point in the body's local space so the
-	// force always applies to the same spot even as the object tumbles.
-	Grabbed = Comp;
-	GrabbedBone = Hit.BoneName;
-	LocalGrabPoint = Comp->GetComponentTransform().InverseTransformPosition(Hit.ImpactPoint);
-	GrabDistance = (Hit.ImpactPoint - ViewLoc).Size();
-
-	State = EDragState::Dragging;
-	return true;
+	// Client RPC
+	ServerTryStartDrag(ViewLoc, ViewDir);
+	return true; // request sent
 }
 
 
 void UDragComponent::StopDrag()
 {
+	// Client RPC
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{
+		ServerStopDrag();
+		return;
+	}
+	
 	Grabbed = nullptr;
 	GrabbedBone = NAME_None;
 	State = EDragState::Undrag;
@@ -185,4 +187,57 @@ void UDragComponent::UpdateDrag(float /*DeltaTime*/)
 	}
 }
 
+
+bool UDragComponent::TryStartDragFromView(const FVector& ViewLoc, const FVector& ViewDir)
+{
+	// Failure cases
+	
+	const FVector SafeDir = ViewDir.GetSafeNormal();
+	if (SafeDir.IsNearlyZero())
+	{
+		return false;
+	}
+
+	const FVector TraceEnd = ViewLoc + SafeDir * MaxGrabDistance;
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(DragTrace), true, GetOwner());
+	FHitResult Hit;
+	const bool bHit = GetWorld()->LineTraceSingleByChannel(
+		Hit, ViewLoc, TraceEnd, TraceChannel, Params);
+
+	if (!bHit)
+	{
+		return false;
+	}
+
+	UPrimitiveComponent* Comp = Hit.GetComponent();
+	if (!Comp || !Comp->IsSimulatingPhysics(Hit.BoneName))
+	{ // Not a physics body
+		return false;
+	}
+
+	
+	// Cache grab info. Store the contact point in the body's local space so the
+	// force always applies to the same spot even as the object tumbles.
+	Grabbed = Comp;
+	GrabbedBone = Hit.BoneName;
+	LocalGrabPoint = Comp->GetComponentTransform().InverseTransformPosition(Hit.ImpactPoint);
+	GrabDistance = (Hit.ImpactPoint - ViewLoc).Size();
+
+	State = EDragState::Dragging;
+	return true;
+}
+
+
+void UDragComponent::ServerTryStartDrag_Implementation(FVector_NetQuantize ViewLoc, FVector_NetQuantizeNormal ViewDir)
+{
+	StopDrag();
+	TryStartDragFromView(ViewLoc, ViewDir);
+}
+
+
+void UDragComponent::ServerStopDrag_Implementation()
+{
+	StopDrag();
+}
 
