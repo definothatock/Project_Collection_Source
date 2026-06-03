@@ -7,6 +7,7 @@
 UDragComponent::UDragComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
+	PrimaryComponentTick.TickGroup = TG_PrePhysics;
 	SetIsReplicatedByDefault(true);
 }
 
@@ -101,7 +102,7 @@ bool UDragComponent::GetOwnerViewPoint(FVector& OutLocation, FVector& OutDirecti
 }
 
 
-void UDragComponent::Auth_UpdateDrag(float /*DeltaTime*/)
+void UDragComponent::Auth_UpdateDrag(float DeltaTime)
 { // commented param means unused for now (kept to match Tick-style signature / future time-based use).
 
 	// Failure Cases
@@ -131,18 +132,30 @@ void UDragComponent::Auth_UpdateDrag(float /*DeltaTime*/)
 		Request_StopDrag();
 		return;
 	}
-
+	
 
 	// PD (Proportional-Derivative) Controller  (I am not from MECH I have no idea what it is really doing)
 
-	const float Mass = Comp->GetMass();
-	const FVector PointVel = Comp->GetPhysicsLinearVelocityAtPoint(GrabWorld, GrabbedBone);
 	// Critically-dampable spring.
 	// mass–spring–damper 2nd‑order linear ODE.
 	// Multiply by Mass so the *unclamped* response is mass-independent (consistent feel);
 	// Strength then caps the actual force, which is what makes heavy bodies sluggish or unliftable.
-	const float Damping = 2.f * DampingRatio * FMath::Sqrt(Stiffness);
-	FVector Force = (Stiffness * Error - Damping * PointVel) * Mass;
+	
+	// Clamp dt to avoid huge unstable jumps on frame hitches
+	const float Dt = FMath::Clamp(DeltaTime, 1.f / 120.f, 1.f / 30.f);
+
+	// Normalize against your tuning reference rate (60 Hz)
+	constexpr float RefDt = 1.f / 60.f;
+	const float DtNorm = Dt / RefDt;
+
+	// Make spring softer at low FPS to preserve stability
+	const float K = Stiffness / (DtNorm * DtNorm);
+	const float D = 2.f * DampingRatio * FMath::Sqrt(K);
+	
+	const float Mass = Comp->GetMass();
+	const FVector PointVel = Comp->GetPhysicsLinearVelocityAtPoint(GrabWorld, GrabbedBone);
+
+	FVector Force = (K * Error - D * PointVel) * Mass;
 
 	
 
