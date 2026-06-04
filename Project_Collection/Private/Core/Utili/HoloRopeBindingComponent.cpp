@@ -146,6 +146,7 @@ void UHoloRopeBindingComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 
 	
 	// ----- Debug Readout -----
+#if UE_BUILD_DEVELOPMENT || UE_BUILD_DEBUG
 	if (bDebugDraw)
 	{
 		if (UWorld* W = GetWorld())
@@ -179,6 +180,7 @@ void UHoloRopeBindingComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 					Distance, SlackDistance, MaxDistance));
 		}
 	}
+#endif
 	
 	
 	ApplyPullForce(BinderLoc, TargetLoc, Distance);
@@ -220,9 +222,9 @@ void UHoloRopeBindingComponent::ApplyPullForce(const FVector& BinderLoc, const F
 		Body->AddForce(Force, NAME_None, bForceIsAcceleration);
 	}
 
-	// UE_LOG(LogTemp, Warning, TEXT("HoloRope: Force applied. %s"), *Force.ToString());
-
+	
 	// ---- Debug readout (force) ----
+#if UE_BUILD_DEVELOPMENT || UE_BUILD_DEBUG
 	if (bDebugDraw)
 	{
 		if (UWorld* W = GetWorld())
@@ -254,6 +256,7 @@ void UHoloRopeBindingComponent::ApplyPullForce(const FVector& BinderLoc, const F
 					Body->GetMass()));
 		}
 	}
+#endif
 }
 
 

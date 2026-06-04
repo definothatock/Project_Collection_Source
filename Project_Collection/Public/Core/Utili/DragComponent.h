@@ -8,6 +8,10 @@
 
 // ==================== Declares ==================== 
 
+// delta time ~ fps
+constexpr float DT_LOWERBOUND = (1.f / 240.f);
+constexpr float DT_UPPERBOUND = (1.f / 20.f);
+
 UENUM(BlueprintType)
 enum class EDragState : uint8
 {
@@ -17,7 +21,7 @@ enum class EDragState : uint8
 
 /*
 UENUM(BlueprintType)
-enum class EHoloRopeUnbindReason : uint8
+enum class EUndragReason : uint8
 {
 	Manual,
 	ExceededMaxDistance,
@@ -36,17 +40,17 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
  * Dragging force is related to the player's strength, target's mass, and the distance from the desired point.
  *
  * State:
- * Dragging <-> Un-drag
- * cache
+ * - Dragging <-> Un-drag
  *
  * Boundary:
- * Physical manipulation, not "pickup".
- * For Configs only Strength cant be adjusted independently.
+ * - Uses PhysicSubTick for calculating and applying force. Minimum stable fps ~30 with default physic substep setting.
+ * - Has slight physics latency due to the substep callback.
+ * - 
  *
  * Networking:
- * Ser-Auth Force Application.
- * Replicates: 
- * 
+ * Ser-Auth Drag Detection and Force Application.
+ *
+ * Reference: https://www.youtube.com/watch?v=_jRLlTDqoGI
  */
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class PROJECT_COLLECTION_API UDragComponent : public UActorComponent
@@ -64,33 +68,38 @@ public:
 
 	// ==================== APIs ====================
 
-	// Trace from the current view and try to grab whatever physics body is hit.
+	// Request Drag action.
 	UFUNCTION(BlueprintCallable, Category = "Drag")
 	void Request_StartDrag();
 
+	// Request to Stop Dragging.
 	UFUNCTION(BlueprintCallable, Category = "Drag")
 	void Request_StopDrag();
 	
 	// ==================== Configs ==================== 
 
-	// Max force the player can exert (saturation limit). This is the "strength".
-	// Heavier targets accelerate less under the same cap.
+	// Max force the player can exert.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Strength")
-	float Strength = 50000.f; // cm-based UE force units; tune to taste
+	float Strength = 50000.f;
 
-	// Spring stiffness. Higher = snappier tracking.
+	// Spring stiffness. Higher = snappier
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
-	float Stiffness = 60.f;
+	float Stiffness = 50.f;
 
 	// 1.0 == critically damped (no overshoot). >1 sluggish, <1 springy.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
-	float DampingRatio = 0.5f; // rename to linear later
-
-	// higher = settles faster
+	float DampingRatio = 1.0f;
+	
+	// Stable PD natural frequency (Hz). Used when bUseStablePD == true.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning", meta=(ClampMin="0.1"))
+	float ResponseHz = 1.5f;
+	
+	// Damping torque from COM to current target impact point.
+	// Note: cannot cancel orthogonal torque. Consider adding another input for rotation manipulation.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
 	float AngularDamping = 1.0f;
-
-	// How far we can trace to start a drag.
+	
+	// How far can trace to start a drag.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
 	float MaxGrabDistance = 200.f;
 
@@ -98,9 +107,39 @@ public:
 	// Covers "too heavy", "dragged too hard", and "obstructed".
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
 	float ReleaseDistance = 200.f;
+	
+	// Cap desired-point velocity estimate (feed-forward clamp).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
+	float MaxDesiredSpeed = 2500.f;
+	
+	// Apply forces from physics substep callback.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
+	bool bUseSubstepForces = true;
 
+	//
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
+	bool bUseStablePD = true;
+
+	// Wake in rare edge cases like "sleep floating".
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
+	bool bForceWakeWhileDragging = false;
+
+	// Add upward force to compensate gravity; reduce static hover error.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
+	bool bEnableGravityCompensation = true;
+
+	// If somehow cannot fetch the World
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
+	float BackupGravitationalForce = -980.f;
+
+	// 1.0 = full gravity cancel, 0.0 = off.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning", meta=(ClampMin="0.0", ClampMax="2.0"))
+	float GravityCompensation = 0.3f;
+	
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
 	TEnumAsByte<ECollisionChannel> TraceChannel = ECC_Visibility;
+
+
 	
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Debug")
 	bool bDebugDraw = false;
@@ -116,12 +155,18 @@ public:
 	// ==================== Internal functions ==================== 
 
 protected:
-	// Resolve the "desired View point": view location + direction.
+	// view location + direction.
 	bool GetOwnerViewPoint(FVector& OutLocation, FVector& OutDirection) const;
 
 private:
+	// Monitor conditions and Call Auth_SubstepDrag().
+	// Called per game tick. 
 	void Auth_UpdateDrag(float DeltaTime);
 
+	// Default runs in physic thread. Backup runs in game tick.
+	void Auth_SubstepApplyDrag(float DeltaTime, FBodyInstance* BodyInstance);
+
+	// Trace and if possible, cache and initialize drag state.
 	bool Auth_TryStartDrag(const FVector& ViewLoc, const FVector& ViewDir);
 
 	UFUNCTION(Server, Reliable)
@@ -134,7 +179,6 @@ private:
 	// ==================== Internal Variables ====================
 
 public:
-	// Cached grab data
 	TWeakObjectPtr<UPrimitiveComponent> Grabbed;
 	FName GrabbedBone = NAME_None;
 	
@@ -148,4 +192,17 @@ private:
 	// Distance from the view origin to the grab point at grab time;
 	// preserved so the object floats at the same depth.
 	float GrabDistance = 0.f;
+	
+	// Desired point cache (updated on game thread tick, consumed in substeps).
+	FVector CachedDesiredPoint = FVector::ZeroVector;
+	FVector CachedDesiredVelocity = FVector::ZeroVector;
+	FVector PrevDesiredPoint = FVector::ZeroVector;
+	bool bHasPrevDesiredPoint = false;
+
+	// Defer stop to game thread if substep detects failure.
+	bool bPendingStopDrag = false;
+
+
+	FCalculateCustomPhysics SubstepDragDelegate;
+	
 };

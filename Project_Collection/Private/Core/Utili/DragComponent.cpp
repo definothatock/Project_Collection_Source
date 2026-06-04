@@ -4,11 +4,16 @@
 #include "Core/Utili/DragComponent.h"
 #include "Net/UnrealNetwork.h"
 
+
+
 UDragComponent::UDragComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
+	// this component's tick runs before physics,so desired target state can be cached for the substep callback.
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
 	SetIsReplicatedByDefault(true);
+
+	SubstepDragDelegate.BindUObject(this, &UDragComponent::Auth_SubstepApplyDrag);
 }
 
 
@@ -18,6 +23,15 @@ void UDragComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorC
 
 	if (!GetOwner() || !GetOwner()->HasAuthority())
 	{return;}
+
+	
+	// Deferred stop from physics callback-safe path.
+	if (bPendingStopDrag)
+	{
+		Request_StopDrag();
+		return;
+	}
+	
 
 	if (State == EDragState::Dragging)
 	{
@@ -32,6 +46,9 @@ void UDragComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLi
 
 	DOREPLIFETIME(UDragComponent, State);
 }
+
+
+// ==================== APIs ====================
 
 
 void UDragComponent::Request_StartDrag()
@@ -70,6 +87,16 @@ void UDragComponent::Request_StopDrag()
 	Grabbed = nullptr;
 	GrabbedBone = NAME_None;
 	State = EDragState::Undrag;
+
+
+	LocalGrabPoint = FVector::ZeroVector;
+	GrabDistance = 0.f;
+
+	CachedDesiredPoint = FVector::ZeroVector;
+	CachedDesiredVelocity = FVector::ZeroVector;
+	PrevDesiredPoint = FVector::ZeroVector;
+	bHasPrevDesiredPoint = false;
+	bPendingStopDrag = false;
 }
 
 
@@ -103,7 +130,7 @@ bool UDragComponent::GetOwnerViewPoint(FVector& OutLocation, FVector& OutDirecti
 
 
 void UDragComponent::Auth_UpdateDrag(float DeltaTime)
-{ // commented param means unused for now (kept to match Tick-style signature / future time-based use).
+{
 
 	// Failure Cases
 	UPrimitiveComponent* Comp = Grabbed.Get();
@@ -112,82 +139,157 @@ void UDragComponent::Auth_UpdateDrag(float DeltaTime)
 		Request_StopDrag();
 		return;
 	}
+	
 	FVector ViewLoc, ViewDir;
 	if (!GetOwnerViewPoint(ViewLoc, ViewDir))
 	{
-		Request_StopDrag();
+		bPendingStopDrag = true;
+		return;
+	}
+
+	const FVector SafeDir = ViewDir.GetSafeNormal();
+	if (SafeDir.IsNearlyZero())
+	{
+		bPendingStopDrag = true;
 		return;
 	}
 	
-	// Where the grab point currently is in the world.
-	const FVector GrabWorld =
-		Comp->GetComponentTransform().TransformPosition(LocalGrabPoint);
-	// Desired point: screen-center direction, at the original grab depth.
-	const FVector Desired = ViewLoc + ViewDir * GrabDistance;
-	const FVector Error = Desired - GrabWorld;
+	
+	// Cache desired target state once per game thread tick.
+	const FVector NewDesired = ViewLoc + SafeDir * GrabDistance;
+	CachedDesiredPoint = NewDesired;
 
-	// Release if the body can't keep up (too heavy / obstructed / yanked too hard).
+	if (bHasPrevDesiredPoint && DeltaTime > KINDA_SMALL_NUMBER)
+	{
+		CachedDesiredVelocity = (NewDesired - PrevDesiredPoint) / DeltaTime;
+		CachedDesiredVelocity = CachedDesiredVelocity.GetClampedToMaxSize(MaxDesiredSpeed);
+	}
+	else
+	{
+		CachedDesiredVelocity = FVector::ZeroVector;
+	}
+
+	PrevDesiredPoint = NewDesired;
+	bHasPrevDesiredPoint = true;
+
+	if (bForceWakeWhileDragging)
+	{
+		Comp->WakeRigidBody(GrabbedBone);
+	}
+
+	// apply force from physics substeps.
+	if (bUseSubstepForces)
+	{
+		if (FBodyInstance* BI = Comp->GetBodyInstance(GrabbedBone))
+		{ // This binding will trigger Auth_SubstepDrag in physics thread during the physics substep tick,
+			// which is more stable at high stiffness and lower fps.
+			BI->AddCustomPhysics(SubstepDragDelegate);
+		}
+		else
+		{
+			bPendingStopDrag = true;
+		}
+	}
+	else
+	{
+		// Fallback to applying forces directly from the game thread if sub-stepping is disabled,
+		// which is less stable but has lower latency.
+		Auth_SubstepApplyDrag(DeltaTime, nullptr);
+	}
+}
+
+
+void UDragComponent::Auth_SubstepApplyDrag(float DeltaTime, FBodyInstance* BodyInstance)
+{
+	UPrimitiveComponent* Comp = Grabbed.Get();
+	if (!Comp || !Comp->IsSimulatingPhysics(GrabbedBone))
+	{
+		bPendingStopDrag = true;
+		return;
+	}
+
+	const FVector WorldGrabPoint = Comp->GetComponentTransform().TransformPosition(LocalGrabPoint);
+
+	// Fetch cached from game tick.
+	const FVector Desired = CachedDesiredPoint;
+	const FVector DesiredVel = CachedDesiredVelocity;
+	const FVector Error = Desired - WorldGrabPoint;
+
+	// Release if the body can't keep up
 	if (Error.SizeSquared() > FMath::Square(ReleaseDistance))
 	{
-		Request_StopDrag();
+		bPendingStopDrag = true;
 		return;
 	}
-	
 
-	// PD (Proportional-Derivative) Controller  (I am not from MECH I have no idea what it is really doing)
-
-	// Critically-dampable spring.
-	// mass–spring–damper 2nd‑order linear ODE.
-	// Multiply by Mass so the *unclamped* response is mass-independent (consistent feel);
-	// Strength then caps the actual force, which is what makes heavy bodies sluggish or unliftable.
-	
-	// Clamp dt to avoid huge unstable jumps on frame hitches
-	const float Dt = FMath::Clamp(DeltaTime, 1.f / 120.f, 1.f / 30.f);
-
-	// Normalize against your tuning reference rate (60 Hz)
-	constexpr float RefDt = 1.f / 60.f;
-	const float DtNorm = Dt / RefDt;
-
-	// Make spring softer at low FPS to preserve stability
-	const float K = Stiffness / (DtNorm * DtNorm);
-	const float D = 2.f * DampingRatio * FMath::Sqrt(K);
-	
+	const float Dt = FMath::Clamp(DeltaTime, DT_LOWERBOUND, DT_UPPERBOUND);
 	const float Mass = Comp->GetMass();
-	const FVector PointVel = Comp->GetPhysicsLinearVelocityAtPoint(GrabWorld, GrabbedBone);
+	const FVector PointVel = Comp->GetPhysicsLinearVelocityAtPoint(WorldGrabPoint, GrabbedBone);
+	FVector Force = FVector::ZeroVector;
 
-	FVector Force = (K * Error - D * PointVel) * Mass;
+	// I am not from MECH. these algo just works.
+	if (bUseStablePD)
+	{ // Stable PD
+		const float Freq = FMath::Max(ResponseHz, 0.1f);
+		const float Omega = 2.f * PI * Freq;
+		const float Kp = Omega * Omega;
+		const float Kd = 2.f * DampingRatio * Omega;
 
-	
+		const float G = 1.f / (1.f + Kd * Dt + Kp * Dt * Dt);
+		const float Ksg = Kp * G;
+		const float Kdg = (Kd + Kp * Dt) * G;
 
+		const FVector VelError = DesiredVel - PointVel;
+		Force = (Ksg * Error + Kdg * VelError) * Mass;
+	}
+	else
+	{ // Legacy PD
+		const float SafeStiffness = FMath::Max(0.f, Stiffness);
+		const float Damping = 2.f * DampingRatio * FMath::Sqrt(SafeStiffness);
+		Force = (SafeStiffness * Error - Damping * PointVel) * Mass;
+	}
+
+	// Canceling gravity
+	if (bEnableGravityCompensation)
+	{
+		const float Gz = GetWorld() ? GetWorld()->GetGravityZ() : BackupGravitationalForce;
+		Force += FVector(0.f, 0.f, -Gz) * Mass * GravityCompensation;
+	}
+
+	// Clamp and apply resultant force
 	const float RawMag = Force.Size();
 	const bool bClamped = RawMag > Strength;
-	if (bClamped)
+	if (bClamped && RawMag > KINDA_SMALL_NUMBER)
 	{
 		Force *= (Strength / RawMag);
 	}
+	Comp->AddForceAtLocation(Force, WorldGrabPoint, GrabbedBone);
 
-	Comp->AddForceAtLocation(Force, GrabWorld, GrabbedBone);
-
+	// Add damping torque
 	const FVector COM = Comp->GetCenterOfMass(GrabbedBone);
-	const FVector Arm = GrabWorld - COM;                 // r in tau = r x F
+	const FVector Arm = WorldGrabPoint - COM;
 	const FVector AngVel = Comp->GetPhysicsAngularVelocityInRadians(GrabbedBone);
-
 	if (bEnableAngularDamping)
 	{
 		Comp->AddTorqueInRadians(-AngularDamping * AngVel, GrabbedBone, true);
 	}
 
-
+	
+	if (bForceWakeWhileDragging)
+	{
+		Comp->WakeRigidBody(GrabbedBone);
+	}
 	
 	// ----- Debug Readout -----
+#if UE_BUILD_DEVELOPMENT || UE_BUILD_DEBUG
 	if (bDebugDraw)
 	{
 		const UWorld* W = GetWorld();
 		DrawDebugSphere(W, Desired,   6.f, 8,  FColor::Green, false, -1.f, 0, 0.5f);
-		DrawDebugSphere(W, GrabWorld, 6.f, 8,  FColor::Cyan,  false, -1.f, 0, 0.5f);
-		DrawDebugLine(W, GrabWorld, Desired, FColor::Yellow, false, -1.f, 0, 1.f);   // error
-		DrawDebugLine(W, COM, GrabWorld, FColor::Magenta, false, -1.f, 0, 1.f);      // torque arm r
-		DrawDebugLine(W, GrabWorld, GrabWorld + Force * 0.0005f, FColor::Red, false, -1.f, 0, 1.f); // force dir
+		DrawDebugSphere(W, WorldGrabPoint, 6.f, 8,  FColor::Cyan,  false, -1.f, 0, 0.5f);
+		DrawDebugLine(W, WorldGrabPoint, Desired, FColor::Yellow, false, -1.f, 0, 1.f);   // error
+		DrawDebugLine(W, COM, WorldGrabPoint, FColor::Magenta, false, -1.f, 0, 1.f);      // torque arm r
+		DrawDebugLine(W, WorldGrabPoint, WorldGrabPoint + Force * 0.0005f, FColor::Red, false, -1.f, 0, 1.f); // force dir
 
 		if (GEngine)
 		{
@@ -201,6 +303,7 @@ void UDragComponent::Auth_UpdateDrag(float DeltaTime)
 					Error.Size(), AngVel.Size()));
 		}
 	}
+#endif
 }
 
 
@@ -240,6 +343,21 @@ bool UDragComponent::Auth_TryStartDrag(const FVector& ViewLoc, const FVector& Vi
 	LocalGrabPoint = Comp->GetComponentTransform().InverseTransformPosition(Hit.ImpactPoint);
 	GrabDistance = (Hit.ImpactPoint - ViewLoc).Size();
 
+	
+	// Initialize target cache to avoid first-frame velocity spike.
+	CachedDesiredPoint = ViewLoc + SafeDir * GrabDistance;
+	PrevDesiredPoint = CachedDesiredPoint;
+	CachedDesiredVelocity = FVector::ZeroVector;
+	bHasPrevDesiredPoint = true;
+	bPendingStopDrag = false;
+
+	if (bForceWakeWhileDragging)
+	{
+		Comp->WakeRigidBody(GrabbedBone);
+	}
+
+	
+	
 	State = EDragState::Dragging;
 	return true;
 }
