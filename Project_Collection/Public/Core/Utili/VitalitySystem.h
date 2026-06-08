@@ -10,7 +10,7 @@
 #include "VitalitySystem.generated.h"
 
 
-// ==================== Struct Declares ==================== 
+// ==================== Declares ==================== 
 
 /**
  * How an effect contributes to the meter cap.

@@ -14,12 +14,15 @@ public class Project_Collection : ModuleRules
 			"CoreUObject", 
 			"Engine", 
 			"InputCore", 
-			"EnhancedInput"
+			"EnhancedInput",
+			
+			"UMG", "Slate", "SlateCore"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
-
+			// "UMGEditor",
+			// "UnrealEd"
 		});
 
 		// Uncomment if you are using Slate UI
