@@ -83,7 +83,13 @@ void UDragComponent::Request_StopDrag()
 		return;
 	}
 
-	// Is Server 
+	// Is Server
+
+	if (Grabbed != nullptr)
+	{
+		Grabbed->SetAngularDamping(0.0f); //Anchor: temp. should cache data and restore.
+	}
+	
 	Grabbed = nullptr;
 	GrabbedBone = NAME_None;
 	State = EDragState::Undrag;
@@ -356,7 +362,10 @@ bool UDragComponent::Auth_TryStartDrag(const FVector& ViewLoc, const FVector& Vi
 		Comp->WakeRigidBody(GrabbedBone);
 	}
 
-	
+	if (Grabbed != nullptr)
+	{
+		Grabbed->SetAngularDamping(1.0f); //Anchor: temp. should cache data and restore.
+	}
 	
 	State = EDragState::Dragging;
 	return true;
