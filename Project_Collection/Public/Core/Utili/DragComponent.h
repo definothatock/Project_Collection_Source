@@ -33,24 +33,27 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
 */
 
 /**
- * Drag and pull for physical objects
- * 
+ * Drag and pull for physical objects.
+ *
  * Main Function:
- * Attempts to drag the object. If allowed, a force will try to push the target into the desired point.
- * Dragging force is related to the player's strength, target's mass, and the distance from the desired point.
+ * - Attempts to grab a valid physics body under the player's view and applies forces to move its grab point toward a desired point.
+ * - Uses a spring or stable PD-style force based on player strength, target mass, stiffness, damping, and grab distance.
  *
  * State:
- * - Dragging <-> Un-drag
+ * - Maintains a simple drag state: Undrag or Dragging.
+ * - Tracks the grabbed component, bone, local grab point, and desired point for substep physics.
  *
  * Boundary:
- * - Uses PhysicSubTick for calculating and applying force. Minimum stable fps ~30 with default physic substep setting.
- * - Has slight physics latency due to the substep callback.
- * - 
+ * - Uses the physics substep callback for force application. This yields better stability, but adds some physics latency.
+ * - Designed for a minimum stable frame rate around 30 FPS with typical physics substepping.
+ * - Releases the drag if the grab point falls too far behind the desired point.
  *
  * Networking:
- * Ser-Auth Drag Detection and Force Application.
+ * - Drag requests are initiated locally, but drag detection and force application are server-authoritative.
+ * - Uses RPCs to start and stop dragging on the server.
  *
- * Reference: https://www.youtube.com/watch?v=_jRLlTDqoGI
+ * Reference:
+ * - https://www.youtube.com/watch?v=_jRLlTDqoGI
  */
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class PROJECT_COLLECTION_API UDragComponent : public UActorComponent
