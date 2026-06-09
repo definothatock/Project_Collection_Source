@@ -7,7 +7,7 @@
 
 #include "Engine/DataTable.h"
 
-#include "VitalitySystem.generated.h"
+#include "VitalityComponent.generated.h"
 
 
 // ==================== Declares ==================== 
@@ -170,12 +170,12 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FVitalityMeterSignature, int32, Ava
  * - Effects are Delta-time update. Will switch to timer  update (each instance handle itself).
  */
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
-class PROJECT_COLLECTION_API UVitalitySystem : public UActorComponent
+class PROJECT_COLLECTION_API UVitalityComponent : public UActorComponent
 {
 	GENERATED_BODY()
 
 public:
-	UVitalitySystem();
+	UVitalityComponent();
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	virtual void BeginPlay() override;

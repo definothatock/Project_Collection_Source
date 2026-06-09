@@ -1,31 +1,31 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 
-#include "Core/Utili/VitalitySystem.h"
+#include "Core/Systems/Vitality/Component/VitalityComponent.h"
 #include "Net/UnrealNetwork.h"
 #include "GameFramework/Actor.h"
 
 
-UVitalitySystem::UVitalitySystem()
+UVitalityComponent::UVitalityComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	SetIsReplicatedByDefault(true);
 }
 
 
-void UVitalitySystem::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+void UVitalityComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
-	DOREPLIFETIME(UVitalitySystem, CurrentStamina);
-	DOREPLIFETIME(UVitalitySystem, CachedCap);
-	DOREPLIFETIME(UVitalitySystem, ActiveEffectArray);
-	DOREPLIFETIME(UVitalitySystem, bConcludedDeath);
-	DOREPLIFETIME(UVitalitySystem, bStaminaLocked);
-	DOREPLIFETIME(UVitalitySystem, bRegenAllowed);
+	DOREPLIFETIME(UVitalityComponent, CurrentStamina);
+	DOREPLIFETIME(UVitalityComponent, CachedCap);
+	DOREPLIFETIME(UVitalityComponent, ActiveEffectArray);
+	DOREPLIFETIME(UVitalityComponent, bConcludedDeath);
+	DOREPLIFETIME(UVitalityComponent, bStaminaLocked);
+	DOREPLIFETIME(UVitalityComponent, bRegenAllowed);
 }
 
 
-void UVitalitySystem::BeginPlay()
+void UVitalityComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
@@ -39,7 +39,7 @@ void UVitalitySystem::BeginPlay()
 }
 
 
-void UVitalitySystem::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+void UVitalityComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
@@ -82,7 +82,7 @@ void UVitalitySystem::TickComponent(float DeltaTime, ELevelTick TickType, FActor
 
 // ----- Effects ----- //
 
-void UVitalitySystem::Auth_ApplyEffect(FVitalityEffect Effect)
+void UVitalityComponent::Auth_ApplyEffect(FVitalityEffect Effect)
 {
 	if (!HasAuthority() || bConcludedDeath || Effect.EffectId.IsNone())
 		{return;}
@@ -99,7 +99,7 @@ void UVitalitySystem::Auth_ApplyEffect(FVitalityEffect Effect)
 }
 
 
-bool UVitalitySystem::Auth_ApplyEffectById(FName EffectId)
+bool UVitalityComponent::Auth_ApplyEffectById(FName EffectId)
 {
 	if (!HasAuthority() || bConcludedDeath || !EffectDatabase)
 		{return false;}
@@ -124,7 +124,7 @@ bool UVitalitySystem::Auth_ApplyEffectById(FName EffectId)
 }
 
 
-void UVitalitySystem::Auth_RemoveEffect(FName EffectId)
+void UVitalityComponent::Auth_RemoveEffect(FName EffectId)
 {
 	if (!HasAuthority())
 		{return;}
@@ -141,7 +141,7 @@ void UVitalitySystem::Auth_RemoveEffect(FName EffectId)
 }
 
 
-void UVitalitySystem::Auth_RemoveAllNegativeEffects()
+void UVitalityComponent::Auth_RemoveAllNegativeEffects()
 {
 	if (!HasAuthority()) { return; }
 
@@ -156,7 +156,7 @@ void UVitalitySystem::Auth_RemoveAllNegativeEffects()
 }
 
 
-void UVitalitySystem::Auth_ClearAllEffects()
+void UVitalityComponent::Auth_ClearAllEffects()
 {
 	if (!HasAuthority() || ActiveEffectArray.Num() == 0)
 		{return;}
@@ -168,7 +168,7 @@ void UVitalitySystem::Auth_ClearAllEffects()
 
 // ----- Stamina ----- //
 
-bool UVitalitySystem::Auth_TryConsumeStamina(float Amount)
+bool UVitalityComponent::Auth_TryConsumeStamina(float Amount)
 {
 	if (!HasAuthority() || bConcludedDeath || bStaminaLocked || IsFainted() || Amount <= 0.f)
 		{return false;}
@@ -185,7 +185,7 @@ bool UVitalitySystem::Auth_TryConsumeStamina(float Amount)
 }
 
 
-void UVitalitySystem::Request_TryConsumeStamina(float Amount)
+void UVitalityComponent::Request_TryConsumeStamina(float Amount)
 {
 	if (HasAuthority())
 		{ Auth_TryConsumeStamina(Amount); }
@@ -194,7 +194,7 @@ void UVitalitySystem::Request_TryConsumeStamina(float Amount)
 }
 
 
-void UVitalitySystem::Auth_AddOrUpdateStaminaDrain(FName DrainId, float RatePerSecond)
+void UVitalityComponent::Auth_AddOrUpdateStaminaDrain(FName DrainId, float RatePerSecond)
 {
 	if (!HasAuthority() || bConcludedDeath || DrainId.IsNone())
 		{ return; }
@@ -213,7 +213,7 @@ void UVitalitySystem::Auth_AddOrUpdateStaminaDrain(FName DrainId, float RatePerS
 	}
 }
 
-void UVitalitySystem::Auth_RemoveStaminaDrain(FName DrainId)
+void UVitalityComponent::Auth_RemoveStaminaDrain(FName DrainId)
 {
 	if (!HasAuthority()) {return;}
 	
@@ -221,35 +221,35 @@ void UVitalitySystem::Auth_RemoveStaminaDrain(FName DrainId)
 }
 
 
-void UVitalitySystem::Auth_SetRegenAllowed(bool bAllowed)
+void UVitalityComponent::Auth_SetRegenAllowed(bool bAllowed)
 {
 	if (!HasAuthority()) {return;}
 	bRegenAllowed = bAllowed;
 }
 
 
-void UVitalitySystem::Auth_SetRegenRateMultiplier(float Multiplier)
+void UVitalityComponent::Auth_SetRegenRateMultiplier(float Multiplier)
 {
 	if (!HasAuthority()) { return; }
 	
 	RegenRateMultiplier = FMath::Max(0.f, Multiplier);
 }
 
-void UVitalitySystem::Auth_ResetRegenRate()
+void UVitalityComponent::Auth_ResetRegenRate()
 {
 	if (!HasAuthority()) { return; }
 	
 	RegenRateMultiplier = 1.f;
 }
 
-void UVitalitySystem::Auth_SetStaminaLocked(bool bLocked)
+void UVitalityComponent::Auth_SetStaminaLocked(bool bLocked)
 {
 	if (!HasAuthority()) { return; }
 	
 	bStaminaLocked = bLocked;
 }
 
-void UVitalitySystem::Auth_ConcludeDeath()
+void UVitalityComponent::Auth_ConcludeDeath()
 {
 	if (!HasAuthority() || bConcludedDeath) { return; }
 	
@@ -260,7 +260,7 @@ void UVitalitySystem::Auth_ConcludeDeath()
 		{ GetOwner()->ForceNetUpdate(); }
 }
 
-void UVitalitySystem::Auth_ResetVitals()
+void UVitalityComponent::Auth_ResetVitals()
 {
 	if (!HasAuthority()) { return; }
 
@@ -284,39 +284,39 @@ void UVitalitySystem::Auth_ResetVitals()
 // ==================== Queries ====================
 
 
-int32 UVitalitySystem::GetAvailableStamina() const
+int32 UVitalityComponent::GetAvailableStamina() const
 {
 	const int32 CapInt = FMath::Max(FMath::FloorToInt(CachedCap), 0);
 	return FMath::Clamp(FMath::FloorToInt(CurrentStamina), 0, CapInt);
 }
 
 
-int32 UVitalitySystem::GetMeterCap() const
+int32 UVitalityComponent::GetMeterCap() const
 {
 	return FMath::FloorToInt(CachedCap); // may be negative
 }
 
 
-int32 UVitalitySystem::GetCapDeficit() const
+int32 UVitalityComponent::GetCapDeficit() const
 {
 	return CachedCap < 0.f ? -FMath::FloorToInt(CachedCap) : 0;
 }
 
 
-float UVitalitySystem::GetAvailableRatio() const
+float UVitalityComponent::GetAvailableRatio() const
 {
 	return BaseCap > 0.f ? FMath::Clamp(static_cast<float>(GetAvailableStamina()) / BaseCap, 0.f, 1.f) : 0.f;
 }
 
 
-bool UVitalitySystem::HasEffect(FName EffectId) const
+bool UVitalityComponent::HasEffect(FName EffectId) const
 {
 	return ActiveEffectArray.ContainsByPredicate(
 		[&](const FVitalityEffect& E) { return E.EffectId == EffectId; });
 }
 
 
-bool UVitalitySystem::GetEffect(FName EffectId, FVitalityEffect& OutEffect) const
+bool UVitalityComponent::GetEffect(FName EffectId, FVitalityEffect& OutEffect) const
 {
 	if (const FVitalityEffect* Found = ActiveEffectArray.FindByPredicate(
 			[&](const FVitalityEffect& E) { return E.EffectId == EffectId; }))
@@ -331,42 +331,42 @@ bool UVitalitySystem::GetEffect(FName EffectId, FVitalityEffect& OutEffect) cons
 // ===================== Internal functions =====================
 
 
-void UVitalitySystem::OnRep_CurrentStamina()
+void UVitalityComponent::OnRep_CurrentStamina()
 {
 	EvaluateStateAndBroadcast();
 }
 
 
-void UVitalitySystem::OnRep_CachedCap()
+void UVitalityComponent::OnRep_CachedCap()
 {
 	EvaluateStateAndBroadcast();
 }
 
 
-void UVitalitySystem::OnRep_ActiveEffects()
+void UVitalityComponent::OnRep_ActiveEffects()
 {
 	OnEffectsChanged.Broadcast();
 	EvaluateStateAndBroadcast();
 }
 
-void UVitalitySystem::OnRep_ConcludedDeath()
+void UVitalityComponent::OnRep_ConcludedDeath()
 {
 }
 
 
-void UVitalitySystem::RpcServer_TryConsumeStamina_Implementation(float Amount)
+void UVitalityComponent::RpcServer_TryConsumeStamina_Implementation(float Amount)
 {
 	Auth_TryConsumeStamina(Amount);
 }
 
 
-bool UVitalitySystem::HasAuthority() const
+bool UVitalityComponent::HasAuthority() const
 {
 	return GetOwner() && GetOwner()->HasAuthority();
 }
 
 
-float UVitalitySystem::ComputeCap() const
+float UVitalityComponent::ComputeCap() const
 {
 	float Cap = BaseCap;
 	for (const FVitalityEffect& Effect : ActiveEffectArray)
@@ -377,7 +377,7 @@ float UVitalitySystem::ComputeCap() const
 }
 
 
-bool UVitalitySystem::UpdateEffects(float DeltaTime)
+bool UVitalityComponent::UpdateEffects(float DeltaTime)
 {
 	bool bRemovedEntry = false;
 
@@ -444,7 +444,7 @@ bool UVitalitySystem::UpdateEffects(float DeltaTime)
 }
 
 
-void UVitalitySystem::RecalculateState()
+void UVitalityComponent::RecalculateState()
 {
     CachedCap = ComputeCap();
     CurrentStamina = FMath::Clamp(CurrentStamina, 0.f, FMath::Max(CachedCap, 0.f));
@@ -453,7 +453,7 @@ void UVitalitySystem::RecalculateState()
 }
 
 
-void UVitalitySystem::EvaluateStateAndBroadcast()
+void UVitalityComponent::EvaluateStateAndBroadcast()
 {
 	const int32 Avail = GetAvailableStamina();
 	const int32 Cap   = GetMeterCap();
@@ -488,7 +488,7 @@ void UVitalitySystem::EvaluateStateAndBroadcast()
 }
 
 
-void UVitalitySystem::InitialiseBaselines()
+void UVitalityComponent::InitialiseBaselines()
 {
 	LastAvailStamina_Int = GetAvailableStamina();
 	LastCap_Int       = GetMeterCap();

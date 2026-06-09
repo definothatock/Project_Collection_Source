@@ -1,12 +1,12 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 
-#include "Core/Utili/VitalityUIAdaptorLib.h"
-#include "Core/Utili/VitalitySystem.h"
+#include "Core/Systems/Vitality/UI/VitalityUIAdaptorLib.h"
+#include "Core/Systems/Vitality/Component/VitalityComponent.h"
 
 
 void UVitalityUIAdaptorLib::BuildVitalityBarView(
-	const UVitalitySystem* System,
+	const UVitalityComponent* System,
 	FVitalityBarView& OutBarView,
 	TArray<FVitalityEffectGroup>& OutGroups)
 {

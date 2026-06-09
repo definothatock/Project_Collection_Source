@@ -5,7 +5,7 @@
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
 
-#include "Core/Utili/VitalityUIAdaptorLib.h"
+#include "Core/Systems/Vitality/UI/VitalityUIAdaptorLib.h"
 
 #include "VitalityDebugBarWidget.generated.h"
 
@@ -19,7 +19,7 @@ class PROJECT_COLLECTION_API UVitalityDebugBarWidget : public UUserWidget
 
 public:
 	UFUNCTION(BlueprintCallable, Category = "Vitality|UI")
-	void SetObservedVitality(UVitalitySystem* InSystem);
+	void SetObservedVitality(UVitalityComponent* InSystem);
 
 	UFUNCTION(BlueprintPure, Category = "Vitality|UI")
 	const FVitalityBarView& GetBarView() const { return CachedBarView; }
@@ -72,7 +72,7 @@ private:
 	void RefreshCachedView();
 	
 	UPROPERTY(Transient)
-	TObjectPtr<UVitalitySystem> ObservedSystem = nullptr;
+	TObjectPtr<UVitalityComponent> ObservedSystem = nullptr;
 
 	UPROPERTY(Transient)
 	FVitalityBarView CachedBarView;

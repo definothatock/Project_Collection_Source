@@ -1,7 +1,7 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 
-#include "Core/Utili/HoloRopeBindingComponent.h"
+#include "Core/Shared/Components/HoloRopeBindingComponent.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/Engine.h"
 

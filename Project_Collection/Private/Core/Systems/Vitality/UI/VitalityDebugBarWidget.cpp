@@ -1,13 +1,13 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 
-#include "Core/Utili/VitalityDebugBarWidget.h"
+#include "Core/Systems/Vitality/UI/VitalityDebugBarWidget.h"
 
 #include "Styling/AppStyle.h"
 #include "Rendering/DrawElements.h"
 
 
-void UVitalityDebugBarWidget::SetObservedVitality(UVitalitySystem* InSystem)
+void UVitalityDebugBarWidget::SetObservedVitality(UVitalityComponent* InSystem)
 {
 	ObservedSystem = InSystem;
 	RefreshCachedView();

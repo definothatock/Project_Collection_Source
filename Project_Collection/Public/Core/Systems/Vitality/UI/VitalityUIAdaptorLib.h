@@ -8,7 +8,7 @@
 
 // ==================== Declares ==================== 
 
-class UVitalitySystem;
+class UVitalityComponent;
 
 /**
  * Contribution of all active instances with same EffectId.
@@ -86,10 +86,10 @@ class PROJECT_COLLECTION_API UVitalityUIAdaptorLib : public UBlueprintFunctionLi
 	GENERATED_BODY()
 
 public:
-	// Build a UI-friendly snapshot from UVitalitySystem.
+	// Build a UI-friendly snapshot from UVitalityComponent.
 	UFUNCTION(BlueprintPure, Category = "Vitality|UI")
 	static void BuildVitalityBarView(
-		const UVitalitySystem* System,
+		const UVitalityComponent* System,
 		FVitalityBarView& OutBarView,
 		TArray<FVitalityEffectGroup>& OutGroups);
 };
