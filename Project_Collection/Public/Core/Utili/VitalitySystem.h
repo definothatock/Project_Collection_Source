@@ -137,28 +137,37 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FVitalityMeterSignature, int32, Ava
 
 
 /**
- * [insert usage here]
+ * VitalitySystem manages a character's stamina pool and dynamic meter cap.
  *
  * Main Function:
- *
- *
+ * - Tracks available stamina and a configurable meter cap.
+ * - Applies named effects that raise or lower the cap over time or instantly.
+ * - Handles bulk stamina consumption, continuous drains, and controlled regeneration.
  *
  * Main Rules:
- * 
+ * - The meter cap can be modified by effects and may become negative.
+ * - Available stamina is clamped to the current cap and reported as an integer.
+ * - A cap of 0 or below means the character is fainted, but not necessarily dead.
  *
  * State:
+ * - BaseCap is the undamaged cap when no effects are active.
+ * - Active effects are stored as runtime instances and may expire or ramp down.
+ * - Stamina drains and regeneration are resolved every tick.
  *
  * Boundary:
+ * - Fainted = cap <= 0; this component does not itself resolve the actor's death behavior.
+ * - Concluded death is a terminal state until ResetVitals is called.
  *
  * Networking:
- *
+ * - Authority-only APIs are prefixed with Auth_ and must be invoked on the server.
+ * - Clients may request consumption via Request_TryConsumeStamina and receive results through replication.
  *
  * Notice:
- * "Fainted" is not "concluded death".
- * Does handle float, but always output integer.
+ * - "Fainted" is not "concluded death".
+ * - Internally uses floats for simulation, but exposed meter values are integer.
  *
- * Issue:
- * Delta-time update. should switch to discrete time update (each instance handle itself).
+ * Future Updates:
+ * - Effects are Delta-time update. Will switch to timer  update (each instance handle itself).
  */
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class PROJECT_COLLECTION_API UVitalitySystem : public UActorComponent
@@ -251,15 +260,19 @@ public:
 	// ==================== Configs ==================== 
 
 public:
-	/** The undamaged maximum the cap returns to when all effects are cleared. */
+	// The undamaged maximum the cap returns to when all effects are cleared.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vitality|Config")
 	float BaseCap = 100.f;
 
-	/** Standard regeneration rate (units/second) when regen is allowed. */
+	// Abs of How far below 0 AND above BaseCap the cap be. Clamp excessive effects
+	// UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vitality|Config")
+	// float CapMeterMargin = 20.f;
+
+	// Standard regeneration rate (units/second) when regen is allowed.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vitality|Config")
 	float BaseRegenRate = 15.f;
 
-	/** Optional CSV / DataTable of FVitalityEffectDef rows for ApplyEffectById. */
+	// Optional CSV / DataTable of FVitalityEffectDef rows for ApplyEffectById.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vitality|Config")
 	TObjectPtr<UDataTable> EffectDatabase = nullptr;
 
@@ -267,7 +280,7 @@ public:
 	// ==================== Queries ====================
 
 public:
-	// Available stamina as an integer in [0, max(Cap,0)]. This is the player-facing meter.
+	// Available stamina as an integer in [0, max(Cap,0)].
 	UFUNCTION(BlueprintPure, Category = "Vitality|Query")
 	int32 GetAvailableStamina() const;
 
@@ -275,7 +288,7 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Vitality|Query")
 	int32 GetMeterCap() const;
 
-	// Undamaged base cap (integer).
+	// Unconditioned base cap (integer).
 	UFUNCTION(BlueprintPure, Category = "Vitality|Query")
 	int32 GetBaseCap() const
 	{ return FMath::FloorToInt(BaseCap); }

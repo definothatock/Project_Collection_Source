@@ -25,7 +25,7 @@ public:
 	const FVitalityBarView& GetBarView() const { return CachedBarView; }
 
 	UFUNCTION(BlueprintPure, Category = "Vitality|UI")
-	const TArray<FVitalityEffectGroupView>& GetGroupedEffects() const { return CachedGroups; }
+	const TArray<FVitalityEffectGroup>& GetGroupedEffects() const { return CachedGroups; }
 
 protected:
 	virtual void NativeConstruct() override;
@@ -78,5 +78,5 @@ private:
 	FVitalityBarView CachedBarView;
 
 	UPROPERTY(Transient)
-	TArray<FVitalityEffectGroupView> CachedGroups;
+	TArray<FVitalityEffectGroup> CachedGroups;
 };

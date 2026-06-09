@@ -10,9 +10,11 @@
 
 class UVitalitySystem;
 
-
+/**
+ * Contribution of all active instances with same EffectId.
+ */
 USTRUCT(BlueprintType)
-struct PROJECT_COLLECTION_API FVitalityEffectGroupView
+struct PROJECT_COLLECTION_API FVitalityEffectGroup
 {
 	GENERATED_BODY()
 
@@ -20,9 +22,8 @@ struct PROJECT_COLLECTION_API FVitalityEffectGroupView
 	FName EffectId = NAME_None;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Vitality|UI")
-	int32 StackCount = 0;
-
-	// Sum of CurrentContribution of all active instances with same EffectId.
+	int32 ActiveStackCount = 0;
+	
 	UPROPERTY(BlueprintReadOnly, Category = "Vitality|UI")
 	float TotalContribution = 0.f;
 };
@@ -90,5 +91,5 @@ public:
 	static void BuildVitalityBarView(
 		const UVitalitySystem* System,
 		FVitalityBarView& OutBarView,
-		TArray<FVitalityEffectGroupView>& OutGroups);
+		TArray<FVitalityEffectGroup>& OutGroups);
 };

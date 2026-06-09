@@ -8,7 +8,7 @@
 void UVitalityUIAdaptorLib::BuildVitalityBarView(
 	const UVitalitySystem* System,
 	FVitalityBarView& OutBarView,
-	TArray<FVitalityEffectGroupView>& OutGroups)
+	TArray<FVitalityEffectGroup>& OutGroups)
 {
 	OutBarView = FVitalityBarView{};
 	OutGroups.Reset();
@@ -27,7 +27,7 @@ void UVitalityUIAdaptorLib::BuildVitalityBarView(
 	float PositiveSum = 0.f;
 	float NegativeSumAbs = 0.f;
 
-	TMap<FName, FVitalityEffectGroupView> GroupMap;
+	TMap<FName, FVitalityEffectGroup> GroupMap;
 
 	for (const FVitalityEffect& E : System->GetActiveEffects())
 	{
@@ -40,9 +40,9 @@ void UVitalityUIAdaptorLib::BuildVitalityBarView(
 			NegativeSumAbs += -E.CurrentContribution;
 		}
 
-		FVitalityEffectGroupView& G = GroupMap.FindOrAdd(E.EffectId);
+		FVitalityEffectGroup& G = GroupMap.FindOrAdd(E.EffectId);
 		G.EffectId = E.EffectId;
-		G.StackCount += 1;
+		G.ActiveStackCount += 1;
 		G.TotalContribution += E.CurrentContribution;
 	}
 

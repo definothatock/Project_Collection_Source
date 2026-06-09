@@ -20,8 +20,6 @@ void UVitalityDebugBarWidget::NativeConstruct()
 	// Do not block gameplay input even if viewport slot is large/fullscreen.
 	SetVisibility(ESlateVisibility::SelfHitTestInvisible);
 
-	// Ensure ticking for cache refresh.
-
 	RefreshCachedView();
 }
 
