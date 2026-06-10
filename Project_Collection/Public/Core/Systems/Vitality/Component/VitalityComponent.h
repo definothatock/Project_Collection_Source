@@ -159,15 +159,15 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FVitalityMeterSignature, int32, Ava
  * - Concluded death is a terminal state until ResetVitals is called.
  *
  * Networking:
- * - Authority-only APIs are prefixed with Auth_ and must be invoked on the server.
  * - Clients may request consumption via Request_TryConsumeStamina and receive results through replication.
+ *
+ * Future Works:
+ * - Effects are Delta-time update. Will switch to timer  update (each instance handle itself).
  *
  * Notice:
  * - "Fainted" is not "concluded death".
  * - Internally uses floats for simulation, but exposed meter values are integer.
  *
- * Future Updates:
- * - Effects are Delta-time update. Will switch to timer  update (each instance handle itself).
  */
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class PROJECT_COLLECTION_API UVitalityComponent : public UActorComponent

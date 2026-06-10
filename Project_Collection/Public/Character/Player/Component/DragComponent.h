@@ -19,18 +19,7 @@ enum class EDragState : uint8
 	Dragging
 };
 
-/*
-UENUM(BlueprintType)
-enum class EUndragReason : uint8
-{
-	Manual,
-	ExceededMaxDistance,
-	TargetInvalid,
-	NoPhysicBody
-};
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
-	FOnHoloRopeUnbound, AActor*, UndraggedTarget, EHoloRopeUnbindReason, Reason);
-*/
+
 
 /**
  * Drag and pull for physical objects.
@@ -38,6 +27,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
  * Main Function:
  * - Attempts to grab a valid physics body under the player's view and applies forces to move its grab point toward a desired point.
  * - Uses a spring or stable PD-style force based on player strength, target mass, stiffness, damping, and grab distance.
+ *
+ * Main Rules:
+ * - 
  *
  * State:
  * - Maintains a simple drag state: Undrag or Dragging.
@@ -50,7 +42,6 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
  *
  * Networking:
  * - Drag requests are initiated locally, but drag detection and force application are server-authoritative.
- * - Uses RPCs to start and stop dragging on the server.
  *
  * Reference:
  * - https://www.youtube.com/watch?v=_jRLlTDqoGI
@@ -59,18 +50,17 @@ UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class PROJECT_COLLECTION_API UDragComponent : public UActorComponent
 {
 	GENERATED_BODY()
-
-public:
-	// Sets default values for this component's properties
-	UDragComponent();
 	
+	UDragComponent();
+
+	// ANCHOR: tick check should be avoidable
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType,
 							   FActorComponentTickFunction* ThisTickFunction) override;
-
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	// ==================== APIs ====================
 
+public:
 	// Request Drag action.
 	UFUNCTION(BlueprintCallable, Category = "Drag")
 	void Request_StartDrag();
@@ -79,8 +69,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Drag")
 	void Request_StopDrag();
 	
-	// ==================== Configs ==================== 
-
+	// ==================== Configs ====================
+	
+protected:
 	// Max force the player can exert.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Strength")
 	float Strength = 50000.f;
@@ -151,10 +142,12 @@ public:
 	bool bEnableAngularDamping = true;
 	
 	// ==================== Queries ====================
-	
+
+public:
 	UFUNCTION(BlueprintPure, Category = "Drag")
 	bool IsDragging() const { return State == EDragState::Dragging; }
 
+	
 	// ==================== Internal functions ==================== 
 
 protected:
