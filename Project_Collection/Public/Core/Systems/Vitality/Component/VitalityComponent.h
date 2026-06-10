@@ -10,7 +10,7 @@
 #include "VitalityComponent.generated.h"
 
 
-// ==================== Declares ==================== 
+/* ==================== Declares ==================== */
 
 /**
  * How an effect contributes to the meter cap.
@@ -173,23 +173,23 @@ UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class PROJECT_COLLECTION_API UVitalityComponent : public UActorComponent
 {
 	GENERATED_BODY()
-
-public:
+	
 	UVitalityComponent();
 
+	
+	/* ==================== Overrides ==================== */
+	
+public:
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	virtual void BeginPlay() override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTick) override;
 
 
+	
 	// ==================== APIs ====================
-    /**
-     * State mutation.
-     * Server-authoritative. Calls without authority or RPC: do nothing
-     */
-
+	
 public:
-	// ----- Effects ----- //
+	/* ----- Effects ----- */
 	
     // Apply one effect instance (stacks in array if same EffectId instance existed).
     UFUNCTION(BlueprintCallable, Category = "Vitality|Effects")
@@ -212,16 +212,16 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Vitality|Effects")
     void Auth_ClearAllEffects();
 
-	// ----- Stamina ----- //
+	/* ----- Stamina ----- */
+	
+	// Client-safe consume request; result arrives via replication.
+	UFUNCTION(BlueprintCallable, Category = "Vitality|Stamina")
+	void Request_TryConsumeStamina(float Amount);
 	
     // Bulk consume. Returns true only if the full amount was available (authority only).
 	// ANCHOR: move to private and under internal since no extern should be using.
     UFUNCTION(BlueprintCallable, Category = "Vitality|Stamina")
     bool Auth_TryConsumeStamina(float Amount);
-	
-    // Client-safe consume request; result arrives via replication.
-    UFUNCTION(BlueprintCallable, Category = "Vitality|Stamina")
-    void Request_TryConsumeStamina(float Amount);
 
     // Register/refresh a continuous drain (gradual consumption).
     UFUNCTION(BlueprintCallable, Category = "Vitality|Stamina")
@@ -246,7 +246,7 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Vitality|Stamina")
     void Auth_SetStaminaLocked(bool bLocked);
 
-	// ----- Lifecycle ----- //
+	/* ----- Lifecycle ----- */
 	
     // Definitive death. Persists state but halts simulation until ResetVitals.
     UFUNCTION(BlueprintCallable, Category = "Vitality|Lifecycle")
@@ -257,28 +257,9 @@ public:
     void Auth_ResetVitals();
 
 	
-	// ==================== Configs ==================== 
 
-public:
-	// The undamaged maximum the cap returns to when all effects are cleared.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vitality|Config")
-	float BaseCap = 100.f;
-
-	// Abs of How far below 0 AND above BaseCap the cap be. Clamp excessive effects
-	// UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vitality|Config")
-	// float CapMeterMargin = 20.f;
-
-	// Standard regeneration rate (units/second) when regen is allowed.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vitality|Config")
-	float BaseRegenRate = 15.f;
-
-	// Optional CSV / DataTable of FVitalityEffectDef rows for ApplyEffectById.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vitality|Config")
-	TObjectPtr<UDataTable> EffectDatabase = nullptr;
-
-
-	// ==================== Queries ====================
-
+	/* ==================== Queries ==================== */
+	
 public:
 	// Available stamina as an integer in [0, max(Cap,0)].
 	UFUNCTION(BlueprintPure, Category = "Vitality|Query")
@@ -327,9 +308,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Vitality|Query")
 	bool GetEffect(FName EffectId, FVitalityEffect& OutEffect) const;
 
-	
-	// ===================== Delegates =====================
 
+	
+	/* ==================== Event Delegates ==================== */
+	
 public:
 	// Fires when the meter cap drops to 0. Actor should faint (does not handle here).
 	UPROPERTY(BlueprintAssignable, Category = "Vitality|Events")
@@ -359,49 +341,13 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Vitality|Events")
 	FVitalitySignature OnEffectsChanged;
 
-	
-	// ==================== Internal Variables ====================
+
+
+	/* ==================== Internal Function ==================== */
 
 protected:
-	// ---- Replicated state (display + authority result) ----
+	/* ----- Replication Broadcast ----- */
 	
-	UPROPERTY(ReplicatedUsing = OnRep_CurrentStamina)
-	float CurrentStamina = 0.f;
-
-	UPROPERTY(ReplicatedUsing = OnRep_CachedCap)
-	float CachedCap = 0.f;
-
-	UPROPERTY(ReplicatedUsing = OnRep_ActiveEffects)
-	TArray<FVitalityEffect> ActiveEffectArray;
-
-	UPROPERTY(ReplicatedUsing  = OnRep_ConcludedDeath)
-	bool bConcludedDeath = false;
-
-	UPROPERTY(Replicated)
-	bool bStaminaLocked = false;
-
-	UPROPERTY(Replicated)
-	bool bRegenAllowed = true;
-
-	// ---- Server runtime ----
-	
-	UPROPERTY(Transient)
-	TArray<FStaminaDrain> ActiveDrains;
-
-
-
-	float RegenRateMultiplier = 1.f;
-
-	// ---- Local transition tracking (server & client) ----
-	
-	int32 LastAvailStamina_Int = 0;
-	int32 LastCap_Int = 0;
-	bool  bLastFainted = false;
-
-
-	// ==================== Internal functions ==================== 
-
-protected:
 	UFUNCTION()
 	void OnRep_CurrentStamina();
 	
@@ -413,13 +359,15 @@ protected:
 
 	UFUNCTION()
 	void OnRep_ConcludedDeath();
+
+	/* ----- RPC ----- */
 	
 	UFUNCTION(Server, Reliable)
 	void RpcServer_TryConsumeStamina(float Amount);
 
 private:
-	bool HasAuthority() const;
-
+	/* ----- Updates ----- */
+	
 	float ComputeCap() const;
 	
 	// true on structural change
@@ -433,4 +381,75 @@ private:
 	
 	// seed Last update without spurious events
 	void InitialiseBaselines();
+
+
+	
+	/* ==================== Runtime State ==================== */
+
+protected:
+	/* ----- Replicated state ----- */
+	
+	UPROPERTY(ReplicatedUsing = OnRep_CurrentStamina)
+	float CurrentStamina = 0.f;
+
+	UPROPERTY(ReplicatedUsing = OnRep_CachedCap)
+	float CachedCap = 0.f;
+
+	UPROPERTY(ReplicatedUsing = OnRep_ActiveEffects)
+	TArray<FVitalityEffect> ActiveEffectArray;
+
+	UPROPERTY(Transient)
+	TArray<FStaminaDrain> ActiveStaminaDrainArray;
+
+	UPROPERTY(ReplicatedUsing  = OnRep_ConcludedDeath)
+	bool bConcludedDeath = false;
+
+	UPROPERTY(Replicated)
+	bool bStaminaLocked = false;
+
+	UPROPERTY(Replicated)
+	bool bRegenAllowed = true;
+
+	/* ----- Local transition tracking (server & client) ----- */
+	
+	int32 PrevAvailStamina_Int = 0;
+	int32 PrevCap_Int = 0;
+	bool  bPrevFainted = false;
+	
+	
+	/* ==================== Config ==================== */
+
+private:
+	/* ----- Cap ----- */
+	
+	// The undamaged maximum the cap returns to when all effects are cleared.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vitality|Config", meta=(AllowPrivateAccess="true"))
+	float BaseCap = 100.f;
+
+	// Abs of How far below 0 AND above BaseCap the cap be. Clamp excessive effects
+	// UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vitality|Config")
+	// float CapMeterMargin = 20.f;
+
+	/* ----- Regen ----- */
+	
+	// Standard regeneration rate (units/second) when regen is allowed.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vitality|Config", meta=(AllowPrivateAccess="true"))
+	float BaseRegenRate = 15.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vitality|Config", meta=(AllowPrivateAccess="true"))
+	float RegenRateMultiplier = 1.f;
+
+	/* ----- Data Setup ----- */
+	
+	// Optional CSV / DataTable of FVitalityEffectDef rows for ApplyEffectById.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vitality|Config", meta=(AllowPrivateAccess="true"))
+	TObjectPtr<UDataTable> EffectDatabase = nullptr;
+
+
+	
+	/* ==================== Helpers ==================== */
+	
+private:
+	bool HasAuthority() const;
+	
 };

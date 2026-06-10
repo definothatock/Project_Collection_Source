@@ -6,7 +6,7 @@
 #include "Components/ActorComponent.h"
 #include "DragComponent.generated.h"
 
-// ==================== Declares ==================== 
+/* ==================== Declares ==================== */
 
 // delta time ~ fps
 constexpr float DT_LOWERBOUND = (1.f / 240.f);
@@ -53,14 +53,16 @@ class PROJECT_COLLECTION_API UDragComponent : public UActorComponent
 	
 	UDragComponent();
 
+	/* ==================== Overrides ==================== */
+public:
 	// ANCHOR: tick check should be avoidable
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType,
 							   FActorComponentTickFunction* ThisTickFunction) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
-
-	// ==================== APIs ====================
-
-public:
+	
+	
+	/* ==================== APIs ==================== */
+	
 	// Request Drag action.
 	UFUNCTION(BlueprintCallable, Category = "Drag")
 	void Request_StartDrag();
@@ -68,93 +70,23 @@ public:
 	// Request to Stop Dragging.
 	UFUNCTION(BlueprintCallable, Category = "Drag")
 	void Request_StopDrag();
-	
-	// ==================== Configs ====================
-	
-protected:
-	// Max force the player can exert.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Strength")
-	float Strength = 50000.f;
 
-	// Spring stiffness. Higher = snappier
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
-	float Stiffness = 50.f;
-
-	// 1.0 == critically damped (no overshoot). >1 sluggish, <1 springy.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
-	float DampingRatio = 1.0f;
-	
-	// Stable PD natural frequency (Hz). Used when bUseStablePD == true.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning", meta=(ClampMin="0.1"))
-	float ResponseHz = 1.5f;
-	
-	// Damping torque from COM to current target impact point.
-	// Note: cannot cancel orthogonal torque. Consider adding another input for rotation manipulation.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
-	float AngularDamping = 1.0f;
-	
-	// How far can trace to start a drag.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
-	float MaxGrabDistance = 200.f;
-
-	// If the grab point falls this far behind the desired point, let go.
-	// Covers "too heavy", "dragged too hard", and "obstructed".
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
-	float ReleaseDistance = 200.f;
-	
-	// Cap desired-point velocity estimate (feed-forward clamp).
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
-	float MaxDesiredSpeed = 2500.f;
-	
-	// Apply forces from physics substep callback.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
-	bool bUseSubstepForces = true;
-
-	//
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
-	bool bUseStablePD = true;
-
-	// Wake in rare edge cases like "sleep floating".
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
-	bool bForceWakeWhileDragging = false;
-
-	// Add upward force to compensate gravity; reduce static hover error.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
-	bool bEnableGravityCompensation = true;
-
-	// If somehow cannot fetch the World
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
-	float BackupGravitationalForce = -980.f;
-
-	// 1.0 = full gravity cancel, 0.0 = off.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning", meta=(ClampMin="0.0", ClampMax="2.0"))
-	float GravityCompensation = 0.3f;
-	
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Tuning")
-	TEnumAsByte<ECollisionChannel> TraceChannel = ECC_Visibility;
+	/* ----- Getters ----- */
 
 
+	/* ==================== Queries ==================== */
 	
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Debug")
-	bool bDebugDraw = false;
-	
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Debug")
-	bool bEnableAngularDamping = true;
-	
-	// ==================== Queries ====================
-
-public:
 	UFUNCTION(BlueprintPure, Category = "Drag")
 	bool IsDragging() const { return State == EDragState::Dragging; }
 
 	
-	// ==================== Internal functions ==================== 
-
-protected:
+private:
+	
+	/* ==================== Internal Function ==================== */
+	
 	// view location + direction.
 	bool GetOwnerViewPoint(FVector& OutLocation, FVector& OutDirection) const;
-
-private:
+	
 	// Monitor conditions and Call Auth_SubstepDrag().
 	// Called per game tick. 
 	void Auth_UpdateDrag(float DeltaTime);
@@ -172,13 +104,11 @@ private:
 	void RpcServer_StopDrag();
 
 
-	// ==================== Internal Variables ====================
-
-public:
+	/* ==================== Runtime State ==================== */
+	
 	TWeakObjectPtr<UPrimitiveComponent> Grabbed;
 	FName GrabbedBone = NAME_None;
 	
-private:
 	UPROPERTY(Transient, Replicated)
 	EDragState State = EDragState::Undrag;
 	
@@ -197,8 +127,84 @@ private:
 
 	// Defer stop to game thread if substep detects failure.
 	bool bPendingStopDrag = false;
-
-
+	
 	FCalculateCustomPhysics SubstepDragDelegate;
 	
+	
+	/* ==================== Config ==================== */
+	
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Config",  meta=(AllowPrivateAccess="true"))
+	TEnumAsByte<ECollisionChannel> TraceChannel = ECC_Visibility;
+	
+	// Max force the player can exert.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Config",  meta=(AllowPrivateAccess="true"))
+	float Strength = 50000.f;
+
+	// How far can trace to start a drag.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Config",  meta=(AllowPrivateAccess="true"))
+	float MaxGrabDistance = 200.f;
+
+	// If the grab point falls this far behind the desired point, let go.
+	// Covers "too heavy", "dragged too hard", and "obstructed".
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Config",  meta=(AllowPrivateAccess="true"))
+	float ReleaseDistance = 200.f;
+	
+	// Cap desired-point velocity estimate (feed-forward clamp).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Config",  meta=(AllowPrivateAccess="true"))
+	float MaxDesiredSpeed = 2500.f;
+
+	/* ----- PD Spring ----- */
+	
+	// Spring stiffness. Higher = snappier
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Config",  meta=(AllowPrivateAccess="true"))
+	float Stiffness = 50.f;
+
+	// 1.0 == critically damped (no overshoot). >1 sluggish, <1 springy.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Config",  meta=(AllowPrivateAccess="true"))
+	float DampingRatio = 1.0f;
+	
+	// Stable PD natural frequency (Hz). Used when bUseStablePD == true.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Config",  meta=(AllowPrivateAccess="true"))
+	float ResponseHz = 1.5f;
+
+	//
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Config",  meta=(AllowPrivateAccess="true"))
+	bool bUseStablePD = true;
+	
+	// Damping torque from COM to current target impact point.
+	// Note: cannot cancel orthogonal torque. Consider adding another input for rotation manipulation.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Config",  meta=(AllowPrivateAccess="true"))
+	float AngularDamping = 1.0f;
+
+	/* ----- Physic ----- */
+	
+	// Apply forces from physics substep callback.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Config",  meta=(AllowPrivateAccess="true"))
+	bool bUseSubstepForces = true;
+
+	/* ----- Gravity ----- */
+	
+	// Add upward force to compensate gravity; reduce static hover error.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Config",  meta=(AllowPrivateAccess="true"))
+	bool bEnableGravityCompensation = true;
+
+	// If somehow cannot fetch the World
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Config",  meta=(AllowPrivateAccess="true"))
+	float BackupGravitationalForce = -980.f;
+
+	// 1.0 = full gravity cancel, 0.0 = off.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Config",  meta=(AllowPrivateAccess="true"))
+	float GravityCompensation = 0.3f;
+
+	/* ----- Debug ----- */
+
+	// Wake in rare edge cases like "sleep floating".
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Config",  meta=(AllowPrivateAccess="true"))
+	bool bForceWakeWhileDragging = false;
+	
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Config",  meta=(AllowPrivateAccess="true"))
+	bool bDebugDraw = false;
+	
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drag|Config",  meta=(AllowPrivateAccess="true"))
+	bool bEnableAngularDamping = true;
 };

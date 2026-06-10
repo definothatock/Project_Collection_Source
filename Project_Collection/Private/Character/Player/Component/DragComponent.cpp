@@ -5,6 +5,7 @@
 #include "Net/UnrealNetwork.h"
 
 
+/* ==================== Overrides ==================== */
 
 UDragComponent::UDragComponent()
 {
@@ -106,7 +107,7 @@ void UDragComponent::Request_StopDrag()
 }
 
 
-// ==================== Internal ==================== 
+// ==================== Internal Function  ==================== 
 
 
 bool UDragComponent::GetOwnerViewPoint(FVector& OutLocation, FVector& OutDirection) const

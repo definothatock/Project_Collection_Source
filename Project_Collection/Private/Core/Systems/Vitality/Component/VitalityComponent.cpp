@@ -51,10 +51,10 @@ void UVitalityComponent::TickComponent(float DeltaTime, ELevelTick TickType, FAc
 	CachedCap = ComputeCap();
 
 	// Gradual consumption (skipped while locked).
-	if (!bStaminaLocked && ActiveDrains.Num() > 0)
+	if (!bStaminaLocked && ActiveStaminaDrainArray.Num() > 0)
 	{
 		float DrainTotal = 0.f;
-		for (const FStaminaDrain& Drain : ActiveDrains)
+		for (const FStaminaDrain& Drain : ActiveStaminaDrainArray)
 		{
 			DrainTotal += Drain.RatePerSecond;
 		}
@@ -168,6 +168,36 @@ void UVitalityComponent::Auth_ClearAllEffects()
 
 // ----- Stamina ----- //
 
+
+void UVitalityComponent::Request_TryConsumeStamina(float Amount)
+{
+	if (HasAuthority())
+	{ Auth_TryConsumeStamina(Amount); }
+	else
+	{ RpcServer_TryConsumeStamina(Amount); }
+}
+
+
+void UVitalityComponent::Auth_AddOrUpdateStaminaDrain(FName DrainId, float RatePerSecond)
+{
+	if (!HasAuthority() || bConcludedDeath || DrainId.IsNone())
+	{ return; }
+
+	if (FStaminaDrain* Existing = ActiveStaminaDrainArray.FindByPredicate(
+			[&](const FStaminaDrain& D) { return D.DrainId == DrainId; }))
+	{
+		Existing->RatePerSecond = RatePerSecond;
+	}
+	else
+	{
+		FStaminaDrain Drain;
+		Drain.DrainId = DrainId;
+		Drain.RatePerSecond = RatePerSecond;
+		ActiveStaminaDrainArray.Add(Drain);
+	}
+}
+
+
 bool UVitalityComponent::Auth_TryConsumeStamina(float Amount)
 {
 	if (!HasAuthority() || bConcludedDeath || bStaminaLocked || IsFainted() || Amount <= 0.f)
@@ -185,39 +215,11 @@ bool UVitalityComponent::Auth_TryConsumeStamina(float Amount)
 }
 
 
-void UVitalityComponent::Request_TryConsumeStamina(float Amount)
-{
-	if (HasAuthority())
-		{ Auth_TryConsumeStamina(Amount); }
-	else
-		{ RpcServer_TryConsumeStamina(Amount); }
-}
-
-
-void UVitalityComponent::Auth_AddOrUpdateStaminaDrain(FName DrainId, float RatePerSecond)
-{
-	if (!HasAuthority() || bConcludedDeath || DrainId.IsNone())
-		{ return; }
-
-	if (FStaminaDrain* Existing = ActiveDrains.FindByPredicate(
-			[&](const FStaminaDrain& D) { return D.DrainId == DrainId; }))
-	{
-		Existing->RatePerSecond = RatePerSecond;
-	}
-	else
-	{
-		FStaminaDrain Drain;
-		Drain.DrainId = DrainId;
-		Drain.RatePerSecond = RatePerSecond;
-		ActiveDrains.Add(Drain);
-	}
-}
-
 void UVitalityComponent::Auth_RemoveStaminaDrain(FName DrainId)
 {
 	if (!HasAuthority()) {return;}
 	
-	ActiveDrains.RemoveAll([&](const FStaminaDrain& D) { return D.DrainId == DrainId; });
+	ActiveStaminaDrainArray.RemoveAll([&](const FStaminaDrain& D) { return D.DrainId == DrainId; });
 }
 
 
@@ -265,7 +267,7 @@ void UVitalityComponent::Auth_ResetVitals()
 	if (!HasAuthority()) { return; }
 
 	ActiveEffectArray.Reset();
-	ActiveDrains.Reset();
+	ActiveStaminaDrainArray.Reset();
 	bConcludedDeath = false;
 	bStaminaLocked = false;
 	bRegenAllowed = true;
@@ -357,12 +359,6 @@ void UVitalityComponent::OnRep_ConcludedDeath()
 void UVitalityComponent::RpcServer_TryConsumeStamina_Implementation(float Amount)
 {
 	Auth_TryConsumeStamina(Amount);
-}
-
-
-bool UVitalityComponent::HasAuthority() const
-{
-	return GetOwner() && GetOwner()->HasAuthority();
 }
 
 
@@ -459,40 +455,47 @@ void UVitalityComponent::EvaluateStateAndBroadcast()
 	const int32 Cap   = GetMeterCap();
 	const bool  bNowFainted = IsFainted();
 
-	if (Cap != LastCap_Int)
+	if (Cap != PrevCap_Int)
 	{
 		OnCapChanged.Broadcast(Avail, Cap);
-		LastCap_Int = Cap;
+		PrevCap_Int = Cap;
 	}
 
-	if (bNowFainted != bLastFainted)
+	if (bNowFainted != bPrevFainted)
 	{
 		if (bNowFainted)
 			{ OnFainted.Broadcast(); }
 		else
 			{ OnRegainedConsciousness.Broadcast(); }
 		
-		bLastFainted = bNowFainted;
+		bPrevFainted = bNowFainted;
 	}
 
-	if (Avail != LastAvailStamina_Int)
+	if (Avail != PrevAvailStamina_Int)
 	{
 		OnStaminaChanged.Broadcast(Avail, Cap);
 		// "Used up to 0" is distinct from fainting (cap == 0).
-		if (Avail == 0 && !bNowFainted && LastAvailStamina_Int > 0)
+		if (Avail == 0 && !bNowFainted && PrevAvailStamina_Int > 0)
 		{
 			OnStaminaDepleted.Broadcast();
 		}
-		LastAvailStamina_Int = Avail;
+		PrevAvailStamina_Int = Avail;
 	}
 }
 
 
 void UVitalityComponent::InitialiseBaselines()
 {
-	LastAvailStamina_Int = GetAvailableStamina();
-	LastCap_Int       = GetMeterCap();
-	bLastFainted     = IsFainted();
+	PrevAvailStamina_Int = GetAvailableStamina();
+	PrevCap_Int       = GetMeterCap();
+	bPrevFainted     = IsFainted();
 }
 
 
+/* ==================== Helpers ==================== */
+
+
+bool UVitalityComponent::HasAuthority() const
+{
+	return GetOwner() && GetOwner()->HasAuthority();
+}
