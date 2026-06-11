@@ -130,7 +130,10 @@ void UDefaultMovementComponent::Request_ToggleClimbing(bool bEnableClimb)
 	if (!CharacterOwner || !CharacterOwner->HasAuthority())
 	{
 		RpcServer_ToggleClimbing(bEnableClimb);
+		return;
 	}
+
+	Auth_ToggleClimbing(bEnableClimb);
 }
 
 
