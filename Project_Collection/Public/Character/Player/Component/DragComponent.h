@@ -41,7 +41,7 @@ enum class EDragState : uint8
  * - Releases the drag if the grab point falls too far behind the desired point.
  *
  * Networking:
- * - Drag requests are initiated locally, but drag detection and force application are server-authoritative.
+ * - Initial Check and requests are local, Drag detection and force application are server-authoritative.
  *
  * Reference:
  * - https://www.youtube.com/watch?v=_jRLlTDqoGI
@@ -60,6 +60,7 @@ public:
 							   FActorComponentTickFunction* ThisTickFunction) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	
+
 	
 	/* ==================== APIs ==================== */
 	
@@ -74,36 +75,38 @@ public:
 	/* ----- Getters ----- */
 
 
+	
 	/* ==================== Queries ==================== */
 	
 	UFUNCTION(BlueprintPure, Category = "Drag")
 	bool IsDragging() const { return State == EDragState::Dragging; }
 
+
 	
 private:
-	
 	/* ==================== Internal Function ==================== */
 	
 	// view location + direction.
-	bool GetOwnerViewPoint(FVector& OutLocation, FVector& OutDirection) const;
+	bool CalculateOwnerViewPoint(FVector& OutLocation, FVector& OutDirection) const;
+	
+	UFUNCTION(Server, Reliable)
+	void RpcServer_TryStartDrag(FVector_NetQuantize ViewLoc, FVector_NetQuantizeNormal ViewDir);
+	
+	// Trace and if possible, cache and initialize drag state.
+	bool Auth_TryStartDrag(const FVector& ViewLoc, const FVector& ViewDir);
 	
 	// Monitor conditions and Call Auth_SubstepDrag().
 	// Called per game tick. 
-	void Auth_UpdateDrag(float DeltaTime);
+	void UpdateDrag(float DeltaTime);
 
 	// Default runs in physic thread. Backup runs in game tick.
-	void Auth_SubstepApplyDrag(float DeltaTime, FBodyInstance* BodyInstance);
-
-	// Trace and if possible, cache and initialize drag state.
-	bool Auth_TryStartDrag(const FVector& ViewLoc, const FVector& ViewDir);
-
-	UFUNCTION(Server, Reliable)
-	void RpcServer_TryStartDrag(FVector_NetQuantize ViewLoc, FVector_NetQuantizeNormal ViewDir);
+	void SubstepApplyDrag(float DeltaTime, FBodyInstance* BodyInstance);
 
 	UFUNCTION(Server, Reliable)
 	void RpcServer_StopDrag();
 
 
+	
 	/* ==================== Runtime State ==================== */
 	
 	TWeakObjectPtr<UPrimitiveComponent> Grabbed;

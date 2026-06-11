@@ -14,7 +14,7 @@ UDragComponent::UDragComponent()
 	PrimaryComponentTick.TickGroup = TG_PrePhysics;
 	SetIsReplicatedByDefault(true);
 
-	SubstepDragDelegate.BindUObject(this, &UDragComponent::Auth_SubstepApplyDrag);
+	SubstepDragDelegate.BindUObject(this, &UDragComponent::SubstepApplyDrag);
 }
 
 
@@ -36,7 +36,7 @@ void UDragComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorC
 
 	if (State == EDragState::Dragging)
 	{
-		Auth_UpdateDrag(DeltaTime);
+		UpdateDrag(DeltaTime);
 	}
 }
 
@@ -55,10 +55,8 @@ void UDragComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLi
 void UDragComponent::Request_StartDrag()
 {
 	FVector ViewLoc, ViewDir;
-	if (!GetOwnerViewPoint(ViewLoc, ViewDir))
-	{
-		return;
-	}
+	if (!CalculateOwnerViewPoint(ViewLoc, ViewDir))
+	{return;}
 	
 
 	// Client RPC
@@ -110,7 +108,7 @@ void UDragComponent::Request_StopDrag()
 // ==================== Internal Function  ==================== 
 
 
-bool UDragComponent::GetOwnerViewPoint(FVector& OutLocation, FVector& OutDirection) const
+bool UDragComponent::CalculateOwnerViewPoint(FVector& OutLocation, FVector& OutDirection) const
 {
 	if (const APawn* Pawn = Cast<APawn>(GetOwner()))
 	{
@@ -136,8 +134,79 @@ bool UDragComponent::GetOwnerViewPoint(FVector& OutLocation, FVector& OutDirecti
 }
 
 
-void UDragComponent::Auth_UpdateDrag(float DeltaTime)
+void UDragComponent::RpcServer_TryStartDrag_Implementation(FVector_NetQuantize ViewLoc, FVector_NetQuantizeNormal ViewDir)
 {
+	Request_StopDrag(); // clean
+	Auth_TryStartDrag(ViewLoc, ViewDir);
+}
+
+
+bool UDragComponent::Auth_TryStartDrag(const FVector& ViewLoc, const FVector& ViewDir)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{return false;}
+	
+	// Failure cases
+	
+	const FVector SafeDir = ViewDir.GetSafeNormal();
+	if (SafeDir.IsNearlyZero())
+	{
+		return false;
+	}
+
+	const FVector TraceEnd = ViewLoc + SafeDir * MaxGrabDistance;
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(DragTrace), true, GetOwner());
+	FHitResult Hit;
+	const bool bHit = GetWorld()->LineTraceSingleByChannel(
+		Hit, ViewLoc, TraceEnd, TraceChannel, Params);
+
+	if (!bHit)
+	{
+		return false;
+	}
+
+	UPrimitiveComponent* Comp = Hit.GetComponent();
+	if (!Comp || !Comp->IsSimulatingPhysics(Hit.BoneName))
+	{ // Not a physics body
+		return false;
+	}
+
+	
+	// Cache grab info. Store the contact point in the body's local space so the
+	// force always applies to the same spot even as the object tumbles.
+	Grabbed = Comp;
+	GrabbedBone = Hit.BoneName;
+	LocalGrabPoint = Comp->GetComponentTransform().InverseTransformPosition(Hit.ImpactPoint);
+	GrabDistance = (Hit.ImpactPoint - ViewLoc).Size();
+
+	
+	// Initialize target cache to avoid first-frame velocity spike.
+	CachedDesiredPoint = ViewLoc + SafeDir * GrabDistance;
+	PrevDesiredPoint = CachedDesiredPoint;
+	CachedDesiredVelocity = FVector::ZeroVector;
+	bHasPrevDesiredPoint = true;
+	bPendingStopDrag = false;
+
+	if (bForceWakeWhileDragging)
+	{
+		Comp->WakeRigidBody(GrabbedBone);
+	}
+
+	if (Grabbed != nullptr)
+	{
+		Grabbed->SetAngularDamping(1.0f); //Anchor: temp. should cache data and restore.
+	}
+	
+	State = EDragState::Dragging;
+	return true;
+}
+
+
+void UDragComponent::UpdateDrag(float DeltaTime)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority())
+	{return;}
 
 	// Failure Cases
 	UPrimitiveComponent* Comp = Grabbed.Get();
@@ -148,7 +217,7 @@ void UDragComponent::Auth_UpdateDrag(float DeltaTime)
 	}
 	
 	FVector ViewLoc, ViewDir;
-	if (!GetOwnerViewPoint(ViewLoc, ViewDir))
+	if (!CalculateOwnerViewPoint(ViewLoc, ViewDir))
 	{
 		bPendingStopDrag = true;
 		return;
@@ -188,7 +257,7 @@ void UDragComponent::Auth_UpdateDrag(float DeltaTime)
 	if (bUseSubstepForces)
 	{
 		if (FBodyInstance* BI = Comp->GetBodyInstance(GrabbedBone))
-		{ // This binding will trigger Auth_SubstepDrag in physics thread during the physics substep tick,
+		{ // This binding will trigger Auth_SubstepDrag in physics thread during target's physics substep tick,
 			// which is more stable at high stiffness and lower fps.
 			BI->AddCustomPhysics(SubstepDragDelegate);
 		}
@@ -201,12 +270,12 @@ void UDragComponent::Auth_UpdateDrag(float DeltaTime)
 	{
 		// Fallback to applying forces directly from the game thread if sub-stepping is disabled,
 		// which is less stable but has lower latency.
-		Auth_SubstepApplyDrag(DeltaTime, nullptr);
+		SubstepApplyDrag(DeltaTime, nullptr);
 	}
 }
 
 
-void UDragComponent::Auth_SubstepApplyDrag(float DeltaTime, FBodyInstance* BodyInstance)
+void UDragComponent::SubstepApplyDrag(float DeltaTime, FBodyInstance* BodyInstance)
 {
 	UPrimitiveComponent* Comp = Grabbed.Get();
 	if (!Comp || !Comp->IsSimulatingPhysics(GrabbedBone))
@@ -311,72 +380,6 @@ void UDragComponent::Auth_SubstepApplyDrag(float DeltaTime, FBodyInstance* BodyI
 		}
 	}
 #endif
-}
-
-
-bool UDragComponent::Auth_TryStartDrag(const FVector& ViewLoc, const FVector& ViewDir)
-{
-	// Failure cases
-	
-	const FVector SafeDir = ViewDir.GetSafeNormal();
-	if (SafeDir.IsNearlyZero())
-	{
-		return false;
-	}
-
-	const FVector TraceEnd = ViewLoc + SafeDir * MaxGrabDistance;
-
-	FCollisionQueryParams Params(SCENE_QUERY_STAT(DragTrace), true, GetOwner());
-	FHitResult Hit;
-	const bool bHit = GetWorld()->LineTraceSingleByChannel(
-		Hit, ViewLoc, TraceEnd, TraceChannel, Params);
-
-	if (!bHit)
-	{
-		return false;
-	}
-
-	UPrimitiveComponent* Comp = Hit.GetComponent();
-	if (!Comp || !Comp->IsSimulatingPhysics(Hit.BoneName))
-	{ // Not a physics body
-		return false;
-	}
-
-	
-	// Cache grab info. Store the contact point in the body's local space so the
-	// force always applies to the same spot even as the object tumbles.
-	Grabbed = Comp;
-	GrabbedBone = Hit.BoneName;
-	LocalGrabPoint = Comp->GetComponentTransform().InverseTransformPosition(Hit.ImpactPoint);
-	GrabDistance = (Hit.ImpactPoint - ViewLoc).Size();
-
-	
-	// Initialize target cache to avoid first-frame velocity spike.
-	CachedDesiredPoint = ViewLoc + SafeDir * GrabDistance;
-	PrevDesiredPoint = CachedDesiredPoint;
-	CachedDesiredVelocity = FVector::ZeroVector;
-	bHasPrevDesiredPoint = true;
-	bPendingStopDrag = false;
-
-	if (bForceWakeWhileDragging)
-	{
-		Comp->WakeRigidBody(GrabbedBone);
-	}
-
-	if (Grabbed != nullptr)
-	{
-		Grabbed->SetAngularDamping(1.0f); //Anchor: temp. should cache data and restore.
-	}
-	
-	State = EDragState::Dragging;
-	return true;
-}
-
-
-void UDragComponent::RpcServer_TryStartDrag_Implementation(FVector_NetQuantize ViewLoc, FVector_NetQuantizeNormal ViewDir)
-{
-	Request_StopDrag();
-	Auth_TryStartDrag(ViewLoc, ViewDir);
 }
 
 

@@ -2,7 +2,7 @@
 
 
 #include "Character/Player/DefaultPlayer/DefaultPlayerCharacter.h"
-#include "Character/Player/Systems/Climbing/ClimbingMovementComponent.h"
+#include "Character/Player/Systems/Climbing/DefaultMovementComponent.h"
 
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
@@ -11,28 +11,24 @@
 #include "InputMappingContext.h"
 
 
-/**
- * Source file for the climbing movement mode.
- * 
- */
 
-
-//
+// 
 ADefaultPlayerCharacter::ADefaultPlayerCharacter(const FObjectInitializer& ObjectInitializer)
-	: Super(ObjectInitializer.SetDefaultSubobjectClass<UClimbingMovementComponent>(ACharacter::CharacterMovementComponentName))
+	: Super(ObjectInitializer.SetDefaultSubobjectClass<UDefaultMovementComponent>(
+															ACharacter::CharacterMovementComponentName))
 {
 	// Keep character rotation behavior movement-driven
 	// ANCHOR: First person, should make this into options for different movement modes
 	bUseControllerRotationPitch = false;
 	bUseControllerRotationYaw = false;
 	bUseControllerRotationRoll = false;
+	
+	ClimbingMovementComponent = Cast<UDefaultMovementComponent>(GetCharacterMovement());
 
-	ClimbingMovementComponent = Cast<UClimbingMovementComponent>(GetCharacterMovement());
-
-	// Base walking tuning
-	GetCharacterMovement()->bOrientRotationToMovement = true;
+	// Base walking setup
+	GetCharacterMovement()->bOrientRotationToMovement = true; // cant rotate when not using ControllerRot
 	GetCharacterMovement()->RotationRate = FRotator(0.f, 500.f, 0.f);
-	GetCharacterMovement()->JumpZVelocity = 700.f;
+	GetCharacterMovement()->JumpZVelocity = 500.f;
 	GetCharacterMovement()->AirControl = 0.35f;
 	GetCharacterMovement()->MaxWalkSpeed = 500.f;
 	GetCharacterMovement()->MinAnalogWalkSpeed = 20.f;
@@ -86,12 +82,13 @@ void ADefaultPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerI
 /* ==================== APIs ==================== */
 
 
-void ADefaultPlayerCharacter::Request_ToggleClimb()
+void ADefaultPlayerCharacter::Request_CustomMovement_Climb()
 {
-	if (!ClimbingMovementComponent) return;
+	if (!ClimbingMovementComponent)
+	{return;}
 
 	const bool bWantsClimb = !ClimbingMovementComponent->IsClimbing();
-	ClimbingMovementComponent->ToggleClimbing(bWantsClimb);
+	ClimbingMovementComponent->Request_ToggleClimbing(bWantsClimb);
 }
 
 
@@ -102,11 +99,11 @@ void ADefaultPlayerCharacter::AddInputMappingContext(UInputMappingContext* Conte
 {
 	if (!ContextToAdd) return;
 
-	if (APlayerController* PC = Cast<APlayerController>(Controller))
+	if (APlayerController* PlyC = Cast<APlayerController>(Controller))
 	{
-		if (ULocalPlayer* LP = PC->GetLocalPlayer())
+		if (ULocalPlayer* LPlayer = PlyC->GetLocalPlayer())
 		{
-			if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(LP))
+			if (UEnhancedInputLocalPlayerSubsystem* Subsystem = ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(LPlayer))
 			{
 				Subsystem->AddMappingContext(ContextToAdd, InPriority);
 			}
@@ -148,7 +145,7 @@ void ADefaultPlayerCharacter::HandleMoveInput(const FInputActionValue& Value)
 void ADefaultPlayerCharacter::HandleLookInput(const FInputActionValue& Value)
 {
 	const FVector2D LookAxis = Value.Get<FVector2D>();
-	if (!Controller) return;
+	if (!Controller) {return;}
 
 	AddControllerYawInput(LookAxis.X);
 	AddControllerPitchInput(LookAxis.Y);
@@ -157,6 +154,6 @@ void ADefaultPlayerCharacter::HandleLookInput(const FInputActionValue& Value)
 
 void ADefaultPlayerCharacter::OnClimbActionStarted(const FInputActionValue& Value)
 {
-	Request_ToggleClimb();
+	Request_CustomMovement_Climb();
 }
 
