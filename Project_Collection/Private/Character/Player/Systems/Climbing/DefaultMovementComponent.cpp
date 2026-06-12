@@ -8,6 +8,8 @@
 #include "Kismet/KismetSystemLibrary.h"
 #include "Kismet/KismetMathLibrary.h"
 
+#include "DrawDebugHelpers.h"
+
 
 /**
  * ======================================================================
@@ -61,8 +63,14 @@ void UDefaultMovementComponent::OnMovementModeChanged(EMovementMode PreviousMove
 		OnEnter_ClimbStateDelegate.ExecuteIfBound();
 	}
 
-	// Clean up climb mode
-	if (PreviousMovementMode == MOVE_Custom && PreviousCustomMode == ECustomMovementMode::MOVE_Climb)
+	// Clean up climb mode.
+	// NOTE: skip this when we are transitioning Climb -> LedgeClimb (both are MOVE_Custom).
+	// We must NOT restore the full capsule / reset rotation in the middle of the mantle;
+	// the small climb capsule is intentionally kept for lip clearance, and cleanup happens
+	// only when the mantle itself finishes (see the LedgeClimb block below).
+	if (PreviousMovementMode == MOVE_Custom
+		&& PreviousCustomMode == ECustomMovementMode::MOVE_Climb
+		&& !IsLedgeClimbing())
 	{
 		bOrientRotationToMovement = true;
 
@@ -81,6 +89,33 @@ void UDefaultMovementComponent::OnMovementModeChanged(EMovementMode PreviousMove
 		OnExit_ClimbStateDelegate.ExecuteIfBound();
 	}
 
+	// NEW: clean up after the coded ledge-climb (mantle) finishes.
+	// Restoring the capsule here (with the target centred at surface + full half-height)
+	// makes the feet land exactly on the surface with no pop.
+	if (PreviousMovementMode == MOVE_Custom
+		&& PreviousCustomMode == ECustomMovementMode::MOVE_ClimbLedge)
+	{
+		bOrientRotationToMovement = true;
+
+		if (CharacterOwner && CharacterOwner->GetCapsuleComponent())
+		{
+			const float RestoreHalfHeight = (DefaultCapsuleHalfHeight > 0.f) ? DefaultCapsuleHalfHeight : FallBackCapsuleHalfHeight;
+			CharacterOwner->GetCapsuleComponent()->SetCapsuleHalfHeight(RestoreHalfHeight);
+		}
+
+		const FRotator DirtyRotation = UpdatedComponent->GetComponentRotation();
+		const FRotator CleanStandRotation = FRotator(0.f, DirtyRotation.Yaw, 0.f);
+		UpdatedComponent->SetRelativeRotation(CleanStandRotation);
+
+		StopMovementImmediately();
+
+		UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] LedgeClimb finished -> Walking, capsule restored."));
+
+		// Treat climb + mantle as one session: broadcast the exit here.
+		OnExit_ClimbStateDelegate.ExecuteIfBound();
+	}
+
+	
 	Super::OnMovementModeChanged(PreviousMovementMode, PreviousCustomMode);
 }
 
@@ -93,6 +128,13 @@ void UDefaultMovementComponent::PhysCustom(float deltaTime, int32 Iterations)
 		return;
 	}
 	
+	// NEW: run the coded mantle physics when in the ledge-climb mode.
+	if (IsLedgeClimbing())
+	{
+		PhysLedgeClimb(deltaTime, Iterations);
+		return;
+	}
+
 	Super::PhysCustom(deltaTime, Iterations);
 }
 
@@ -119,6 +161,15 @@ float UDefaultMovementComponent::GetMaxAcceleration() const
 }
 
 
+
+/**
+ * =============================================================
+ * ==================== Climb Movement Mode ====================
+ * =============================================================
+ */
+
+
+
 /* ==================== APIs ==================== */
 
 
@@ -143,6 +194,12 @@ void UDefaultMovementComponent::Request_ToggleClimbing(bool bEnableClimb)
 bool UDefaultMovementComponent::IsClimbing() const
 {
 	return MovementMode == MOVE_Custom && CustomMovementMode == ECustomMovementMode::MOVE_Climb;
+}
+
+
+bool UDefaultMovementComponent::IsLedgeClimbing() const
+{
+	return MovementMode == MOVE_Custom && CustomMovementMode == ECustomMovementMode::MOVE_ClimbLedge;
 }
 
 
@@ -196,7 +253,7 @@ TArray<FHitResult> UDefaultMovementComponent::DoCapsuleTraceMultiByObject(
 		false
 	);
 	
-	UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] DoCapsuleTraceMultiByObject - Found %d hits"), OutCapsuleTraceHitResults.Num());
+	// UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] DoCapsuleTraceMultiByObject - Found %d hits"), OutCapsuleTraceHitResults.Num());
 
 	return OutCapsuleTraceHitResults;
 }
@@ -233,6 +290,7 @@ FHitResult UDefaultMovementComponent::DoLineTraceSingleByObject(
 		false
 	);
 	
+	/*
 	if (OutHit.bBlockingHit)
 	{
 		UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] DoLineTraceSingleByObject - Hit actor: %s at location: %s"),
@@ -242,6 +300,7 @@ FHitResult UDefaultMovementComponent::DoLineTraceSingleByObject(
 	{
 		UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] DoLineTraceSingleByObject - No hit detected"));
 	}
+	*/
 
 	return OutHit;
 }
@@ -256,11 +315,7 @@ bool UDefaultMovementComponent::TraceClimbableSurfaces()
 	Climb_ClimableSurfaceMultiTracedResults = DoCapsuleTraceMultiByObject(Start, End);
 	const bool bFoundSurfaces = !Climb_ClimableSurfaceMultiTracedResults.IsEmpty();
 	
-	if (bFoundSurfaces)
-	{
-		UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] TraceClimbableSurfaces - Found %d surfaces"), Climb_ClimableSurfaceMultiTracedResults.Num());
-	}
-	else
+	if (!bFoundSurfaces)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[ClimbingMovement] TraceClimbableSurfaces - No surfaces found (check ClimbableSurfaceTraceTypes configuration)"));
 	}
@@ -271,7 +326,7 @@ bool UDefaultMovementComponent::TraceClimbableSurfaces()
 
 FHitResult UDefaultMovementComponent::TraceFromEyeHeight(
 	float TraceDistance,
-	float TraceStartOffset,
+	float TraceStartHeightOffset,
 	bool bShowDebugShape,
 	bool bDrawPersistantShapes
 )
@@ -283,7 +338,7 @@ FHitResult UDefaultMovementComponent::TraceFromEyeHeight(
 
 	const FVector ComponentLocation = UpdatedComponent->GetComponentLocation();
 	const FVector EyeHeightOffset =
-		UpdatedComponent->GetUpVector() * (CharacterOwner->BaseEyeHeight + TraceStartOffset);
+		UpdatedComponent->GetUpVector() * (CharacterOwner->BaseEyeHeight + TraceStartHeightOffset);
 
 	const FVector Start = ComponentLocation + EyeHeightOffset;
 	const FVector End = Start + UpdatedComponent->GetForwardVector() * TraceDistance;
@@ -347,32 +402,6 @@ bool UDefaultMovementComponent::CanStartClimbing()
 	return true;
 }
 
-bool UDefaultMovementComponent::CanClimbDownLedge()
-{
-	if(IsFalling()) return false;
-	 
-	const FVector ComponentLocation = UpdatedComponent->GetComponentLocation();
-	const FVector ComponentForward = UpdatedComponent->GetForwardVector();
-	const FVector DownVector = -UpdatedComponent->GetUpVector();
-
-	const FVector WalkableSurfaceTraceStart = ComponentLocation + ComponentForward * Climb_DownWalkableSurfaceTraceOffset;
-	const FVector WalkableSurfaceTraceEnd = WalkableSurfaceTraceStart + DownVector * 100.f;
-
-	FHitResult WalkableSurfaceHit = DoLineTraceSingleByObject(WalkableSurfaceTraceStart,WalkableSurfaceTraceEnd);
-
-	const FVector LedgeTraceStart = WalkableSurfaceHit.TraceStart + ComponentForward * Climb_DownLedgeTraceOffset;
-	const FVector LedgeTraceEnd = LedgeTraceStart + DownVector * 200.f;
-
-	FHitResult LedgeTraceHit = DoLineTraceSingleByObject(LedgeTraceStart,LedgeTraceEnd);
-
-	if(WalkableSurfaceHit.bBlockingHit && !LedgeTraceHit.bBlockingHit)
-	{
-		return true;
-	}
-
-	return false;
-}
-
 
 void UDefaultMovementComponent::StartClimbing()
 {
@@ -408,26 +437,45 @@ void UDefaultMovementComponent::PhysClimb(float deltaTime, int32 Iterations)
 		return;
 	}
 
-	// Define climb velocity
+	// Update Desired @Velocity based on input (later overwrite)
 	CalcVelocity(deltaTime, 0.f, true, Climb_MaxBreakDeceleration);
 
 	const FVector OldLocation = UpdatedComponent->GetComponentLocation();
-	const FVector Adjusted = Velocity * deltaTime;
+	const FVector DesiredTickDisplacement = Velocity * deltaTime;
 	FHitResult Hit(1.f);
 
-	// Handle climb rotation + movement
-	SafeMoveUpdatedComponent(Adjusted, Climb_CalculateSurfaceAlignedRot(deltaTime), true, Hit);
-
+	// Tries to move (climb) and rotate to Desired values
+	SafeMoveUpdatedComponent(DesiredTickDisplacement, Climb_CalculateSurfaceAlignedRot(deltaTime), true, Hit);
+	
 	if (Hit.Time < 1.f)
 	{
-		HandleImpact(Hit, deltaTime, Adjusted);
-		SlideAlongSurface(Adjusted, (1.f - Hit.Time), Hit.Normal, Hit, true);
+		// Unreal resolve impact and slide
+		HandleImpact(Hit, deltaTime, DesiredTickDisplacement);
+		SlideAlongSurface(DesiredTickDisplacement, (1.f - Hit.Time), Hit.Normal, Hit, true);
 	}
 
+	// Rewrite @Velocity to actual movement
 	Velocity = (UpdatedComponent->GetComponentLocation() - OldLocation) / deltaTime;
 
 	// Snap movement to climbable surface
 	Climb_SnapMovementToSurfaces(deltaTime);
+
+
+	// NEW: when we climb into the top lip while moving up, hand off to the coded mantle.
+	// TryStartLedgeClimb() switches movement mode, after which
+	// IsClimbing() becomes false and PhysClimb stops running (no repeated triggering).
+	if (CheckHasReachedLedge())
+	{
+		if (LedgeClimbMethod == ELedgeClimbMethod::RootMotion)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] Reached ledge, but RootMotion is selected. Coded ledge climb is disabled until RootMotion is implemented."));
+		}
+		else
+		{
+			UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] Reached ledge -> attempting coded ledge climb."));
+			Auth_TryStartLedgeClimb();
+		}
+	}
 }
 
 
@@ -442,7 +490,7 @@ void UDefaultMovementComponent::ProcessClimableSurfaceInfo()
 		return;
 	}
 
-	// Average out all the traced surfaces to get a more stable location and normal
+	// Average out all the traced surfaces to get a more stable, representative location and normal
 	for (const FHitResult& TracedHitResult : Climb_ClimableSurfaceMultiTracedResults)
 	{
 		Climb_CurrentSurfaceLocation += TracedHitResult.ImpactPoint;
@@ -471,7 +519,7 @@ bool UDefaultMovementComponent::CheckShouldStopClimbing()
 	const float DegreeDiff = FMath::RadiansToDegrees(FMath::Acos(DotResult));
 
 	// Surface too horizontal => stop climb.
-	return DegreeDiff <= Climb_MaxSurfaceDegree;
+	return DegreeDiff <= Climb_MaxSurfaceNormalFromUp;	
 }
 
 
@@ -502,32 +550,6 @@ bool UDefaultMovementComponent::CheckHasReachedFloor()
 	return false;
 }
 
-bool UDefaultMovementComponent::CheckHasReachedLedge()
-{
-	// ANCHOR: might want to make some offset in the future; make a config var?
-	FHitResult LedgetHitResult = TraceFromEyeHeight(Climb_EyeHeightTraceDistance);
-
-	// If no surface detected at eye height, check if there's a walkable surface below to determine if we've reached a ledge.
-	if(!LedgetHitResult.bBlockingHit)
-	{
-		const FVector WalkableSurfaceTraceStart = LedgetHitResult.TraceEnd;
-
-		const FVector DownVector = -UpdatedComponent->GetUpVector();
-		const FVector WalkableSurfaceTraceEnd = WalkableSurfaceTraceStart + DownVector * 100.f;
-
-		FHitResult WalkabkeSurfaceHitResult =
-		DoLineTraceSingleByObject(WalkableSurfaceTraceStart,WalkableSurfaceTraceEnd);
-
-		// If we hit a walkable surface and we're moving downward, we can consider that we've reached a ledge.
-		if(WalkabkeSurfaceHitResult.bBlockingHit && GetLocalSpaceVelocity().Z > 10.f)
-		{
-			return true;
-		}
-	}
-
-	return false;
-}
-
 
 FQuat UDefaultMovementComponent::Climb_CalculateSurfaceAlignedRot(float DeltaTime)
 {
@@ -542,22 +564,276 @@ FQuat UDefaultMovementComponent::Climb_CalculateSurfaceAlignedRot(float DeltaTim
 void UDefaultMovementComponent::Climb_SnapMovementToSurfaces(float DeltaTime)
 {
 	const FVector ComponentForward = UpdatedComponent->GetForwardVector();
-	const FVector ComponentLocation = UpdatedComponent->GetComponentLocation();
+	const FVector ComponentWrldLoc = UpdatedComponent->GetComponentLocation();
 
-	const FVector ProjectedCharacterToSurface =
-		(Climb_CurrentSurfaceLocation - ComponentLocation).ProjectOnTo(ComponentForward);
+	const FVector RelativeDistance = Climb_CurrentSurfaceLocation - ComponentWrldLoc;
 
-	const FVector SnapVector = -Climb_CurrentSurfaceNormal * ProjectedCharacterToSurface.Length();
-	const FVector FinalSnapAmount = SnapVector * DeltaTime * Climb_MaxSpeed;
+	// Estimate how far the surface point is along player forward (not the true perpendicular distance).
+	const FVector DistanceProjectedToForward =
+		(RelativeDistance).ProjectOnTo(ComponentForward);
+
+	// Move toward the surface along the inward normal by the estimated distance.
+	// ignoring length signs because it is impossible to climb on your back.
+	const FVector SnapToSurfaceVector = -Climb_CurrentSurfaceNormal * DistanceProjectedToForward.Length();
+	const FVector TickSnapAmount = SnapToSurfaceVector * DeltaTime * Climb_MaxSpeed;
 	
 	UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] SnapMovementToClimableSurfaces - SnapVector: %s, FinalSnapAmount: %s"),
-		*SnapVector.ToString(), *FinalSnapAmount.ToString());
+		*SnapToSurfaceVector.ToString(), *TickSnapAmount.ToString());
 
 	UpdatedComponent->MoveComponent(
-		FinalSnapAmount,
+		TickSnapAmount,
 		UpdatedComponent->GetComponentQuat(),
 		true
 	);
 }
 
 
+bool UDefaultMovementComponent::QueryLedgeTopSurface(FHitResult& OutTopSurfaceHit, FVector& OutForwardProbeEnd, bool bDrawDebug)
+{
+	const FHitResult ForwardClearHit = TraceFromEyeHeight(Climb_EyeHeightTraceDistance, LedgeClimb_TopProbeUpOffset, bDrawDebug);
+
+	if (ForwardClearHit.bBlockingHit)
+	{
+		return false;
+	}
+
+	OutForwardProbeEnd = ForwardClearHit.TraceEnd;
+
+	const FVector DownVector = -UpdatedComponent->GetUpVector();
+	const FVector DownEnd = OutForwardProbeEnd + DownVector * LedgeClimb_TopProbeDownDistance;
+
+	OutTopSurfaceHit = DoLineTraceSingleByObject(OutForwardProbeEnd, DownEnd, bDrawDebug);
+	return OutTopSurfaceHit.bBlockingHit;
+}
+
+
+/* ----- Climb Ledge ----- */
+
+
+bool UDefaultMovementComponent::CheckHasReachedLedge()
+{
+	FHitResult TopSurfaceHit;
+	FVector ForwardProbeEnd;
+
+	if (QueryLedgeTopSurface(TopSurfaceHit, ForwardProbeEnd, false) && GetLocalSpaceVelocity().Z > 10.f)
+	{
+		return true;
+	}
+
+	return false;
+}
+
+
+bool UDefaultMovementComponent::CalcLedgeClimbTarget(FVector& OutLandLocation)
+{
+	OutLandLocation = FVector::ZeroVector;
+
+	if (!CharacterOwner)
+	{return false;}
+
+	FHitResult TopSurfaceHit;
+	FVector ForwardProbeEnd;
+
+	// check again to cache data //ANCHOR: might
+	if (!QueryLedgeTopSurface(TopSurfaceHit, ForwardProbeEnd, bClimb_DebugDraw))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ClimbingMovement] CalcLedgeClimbTarget - no top surface found below the lip."));
+		return false;
+	}
+
+	// Reject surfaces that are too steep to stand on (e.g. a slanted underside).
+	const float SurfaceDotUp = FVector::DotProduct(TopSurfaceHit.ImpactNormal, FVector::UpVector);
+	if (SurfaceDotUp < GetWalkableFloorZ()) // CMC setting
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ClimbingMovement] CalcLedgeClimbTarget - top surface not walkable (dot %.3f < floorZ %.3f)."),
+			SurfaceDotUp, GetWalkableFloorZ());
+		return false;
+	}
+
+	// Build the final capsule rest location
+	// - Use the FULL default half-height (not the shrunk climb height) so that when the capsule is restored on
+	// mantle exit, the feet sit on the surface.
+	// - Push forward onto the surface so we don't land balancing on the edge.
+	const float FullHalfHeight = (DefaultCapsuleHalfHeight > 0.f) ? DefaultCapsuleHalfHeight : FallBackCapsuleHalfHeight;
+
+	// Horizontal "into the surface" direction (the way we travel onto the top).
+	FVector HorizForward = -Climb_CurrentSurfaceNormal;
+	HorizForward.Z = 0.f;
+	if (!HorizForward.Normalize())
+	{
+		// Fallback if the surface normal was near-vertical/degenerate.
+		HorizForward = UpdatedComponent->GetForwardVector();
+		HorizForward.Z = 0.f;
+		HorizForward.Normalize();
+	}
+
+	OutLandLocation =
+		TopSurfaceHit.ImpactPoint
+		+ FVector::UpVector * (FullHalfHeight + 2.f)      // +2 skin to avoid starting embedded
+		+ HorizForward * LedgeClimb_ForwardLandOffset;
+
+	UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] CalcLedgeClimbTarget - land location: %s"), *OutLandLocation.ToString());
+	return true;
+}
+
+
+void UDefaultMovementComponent::Auth_TryStartLedgeClimb()
+{
+	if (!CharacterOwner || !CharacterOwner->HasAuthority())
+	{return;}
+
+	if (LedgeClimbMethod == ELedgeClimbMethod::RootMotion)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] Auth_TryStartLedgeClimb skipped: RootMotion ledge climb selected and not yet implemented."));
+		return;
+	}
+
+	FVector LandLocation;
+	if (!CalcLedgeClimbTarget(LandLocation))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ClimbingMovement] TryStartLedgeClimb - no valid target, staying on wall."));
+		return;
+	}
+
+	// --- Build the L-shaped path ---
+	// Start: where we currently are on the wall.
+	// OverLedge: straight up from Start, to just above the target surface (+clearance) so the lip is cleared.
+	// Target: the final rest spot on top.
+	LedgeClimb_StartLocation    = UpdatedComponent->GetComponentLocation();
+	LedgeClimb_TargetLocation   = LandLocation;
+	LedgeClimb_OverLedgeLocation = FVector(
+		LedgeClimb_StartLocation.X,
+		LedgeClimb_StartLocation.Y,
+		LandLocation.Z + LedgeClimb_VerticalClearance);
+
+	// Final facing: upright, looking across the top surface (the direction we travel onto it).
+	FVector HorizForward = -Climb_CurrentSurfaceNormal;
+	HorizForward.Z = 0.f;
+	if (!HorizForward.Normalize())
+	{
+		HorizForward = UpdatedComponent->GetForwardVector();
+		HorizForward.Z = 0.f;
+		HorizForward.Normalize();
+	}
+	LedgeClimb_TargetRotation = FRotationMatrix::MakeFromXZ(HorizForward, FVector::UpVector).ToQuat();
+
+	LedgeClimb_Alpha = 0.f;
+
+	// --- Debug: draw the whole planned path so you can eyeball it against the geometry ---
+	if (bClimb_DebugDraw && GetWorld())
+	{
+		DrawDebugSphere(GetWorld(), LedgeClimb_StartLocation,     12.f, 12, FColor::Green,  false, 4.f);
+		DrawDebugSphere(GetWorld(), LedgeClimb_OverLedgeLocation, 12.f, 12, FColor::Yellow, false, 4.f);
+		DrawDebugSphere(GetWorld(), LedgeClimb_TargetLocation,    12.f, 12, FColor::Red,    false, 4.f);
+		DrawDebugLine(GetWorld(), LedgeClimb_StartLocation,     LedgeClimb_OverLedgeLocation, FColor::Cyan, false, 4.f, 0, 2.f);
+		DrawDebugLine(GetWorld(), LedgeClimb_OverLedgeLocation, LedgeClimb_TargetLocation,    FColor::Cyan, false, 4.f, 0, 2.f);
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] LedgeClimb START | Start:%s Over:%s Target:%s"),
+		*LedgeClimb_StartLocation.ToString(),
+		*LedgeClimb_OverLedgeLocation.ToString(),
+		*LedgeClimb_TargetLocation.ToString());
+
+	SetMovementMode(MOVE_Custom, ECustomMovementMode::MOVE_ClimbLedge);
+}
+
+
+
+void UDefaultMovementComponent::PhysLedgeClimb(float deltaTime, int32 Iterations)
+{
+	if (deltaTime < MIN_TICK_TIME)
+	{
+		return;
+	}
+
+	// Advance normalized progress.
+	LedgeClimb_Alpha += deltaTime / FMath::Max(LedgeClimb_Duration, KINDA_SMALL_NUMBER);
+	const float ClampedAlpha = FMath::Clamp(LedgeClimb_Alpha, 0.f, 1.f);
+
+	// --- Pick the point on the two-segment path for this alpha ---
+	// Segment 1 (0 .. PhaseSplit):   Start      -> OverLedge   (rise, clear the lip)
+	// Segment 2 (PhaseSplit .. 1):   OverLedge  -> Target      (move over and settle)
+	FVector DesiredLocation;
+	if (ClampedAlpha <= LedgeClimb_PhaseSplit)
+	{
+		const float SegAlpha = ClampedAlpha / LedgeClimb_PhaseSplit;
+		DesiredLocation = FMath::Lerp(LedgeClimb_StartLocation, LedgeClimb_OverLedgeLocation, SegAlpha);
+	}
+	else
+	{
+		const float SegAlpha = (ClampedAlpha - LedgeClimb_PhaseSplit) / (1.f - LedgeClimb_PhaseSplit);
+		DesiredLocation = FMath::Lerp(LedgeClimb_OverLedgeLocation, LedgeClimb_TargetLocation, SegAlpha);
+	}
+
+	// Delta from the capsule's ACTUAL location (not the ideal), so if a previous tick got
+	// blocked we naturally try to catch up next tick instead of drifting.
+	const FVector CurrentLocation = UpdatedComponent->GetComponentLocation();
+	const FVector MoveDelta = DesiredLocation - CurrentLocation;
+
+	// Interp rotation toward the upright "on top" facing.
+	const FQuat NewQuat = FMath::QInterpTo(UpdatedComponent->GetComponentQuat(), LedgeClimb_TargetRotation, deltaTime, 5.f);
+
+	// Swept move: respects collision. If our math sends the capsule into geometry, it stops
+	// here (and we log/draw) rather than tunneling — that's your debugging signal.
+	FHitResult Hit(1.f);
+	SafeMoveUpdatedComponent(MoveDelta, NewQuat, true, Hit);
+
+	if (Hit.IsValidBlockingHit())
+	{
+		// Don't fight the wall; just report it. If you see this firing a lot, increase
+		// LedgeClimb_VerticalClearance or your trace offsets.
+		UE_LOG(LogTemp, Warning, TEXT("[ClimbingMovement] PhysLedgeClimb BLOCKED at alpha %.2f by %s (normal %s)"),
+			ClampedAlpha, *GetNameSafe(Hit.GetActor()), *Hit.Normal.ToString());
+
+		if (bClimb_DebugDraw && GetWorld())
+		{
+			DrawDebugPoint(GetWorld(), Hit.ImpactPoint, 14.f, FColor::Red, false, 2.f);
+		}
+	}
+
+	// Keep Velocity coherent for anything reading it (anim/UI), based on what actually moved.
+	Velocity = (UpdatedComponent->GetComponentLocation() - CurrentLocation) / deltaTime;
+
+	// --- Debug: current desired vs actual ---
+	if (bClimb_DebugDraw && GetWorld())
+	{
+		DrawDebugSphere(GetWorld(), DesiredLocation, 6.f, 8, FColor::Magenta, false, -1.f);
+	}
+
+	UE_LOG(LogTemp, Verbose, TEXT("[ClimbingMovement] PhysLedgeClimb | alpha:%.2f desired:%s actual:%s"),
+		ClampedAlpha, *DesiredLocation.ToString(), *UpdatedComponent->GetComponentLocation().ToString());
+
+	// Done -> hand back to normal walking (capsule restore happens in OnMovementModeChanged).
+	if (LedgeClimb_Alpha >= 1.f)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] LedgeClimb COMPLETE."));
+		SetMovementMode(MOVE_Walking);
+	}
+}
+
+
+bool UDefaultMovementComponent::CanClimbDownLedge()
+{
+	if(IsFalling()) return false;
+	 
+	const FVector ComponentLocation = UpdatedComponent->GetComponentLocation();
+	const FVector ComponentForward = UpdatedComponent->GetForwardVector();
+	const FVector DownVector = -UpdatedComponent->GetUpVector();
+
+	const FVector WalkableSurfaceTraceStart = ComponentLocation + ComponentForward * Climb_DownWalkableSurfaceTraceOffset;
+	const FVector WalkableSurfaceTraceEnd = WalkableSurfaceTraceStart + DownVector * 100.f;
+
+	FHitResult WalkableSurfaceHit = DoLineTraceSingleByObject(WalkableSurfaceTraceStart,WalkableSurfaceTraceEnd);
+
+	const FVector LedgeTraceStart = WalkableSurfaceHit.TraceStart + ComponentForward * Climb_DownLedgeTraceOffset;
+	const FVector LedgeTraceEnd = LedgeTraceStart + DownVector * 200.f;
+
+	FHitResult LedgeTraceHit = DoLineTraceSingleByObject(LedgeTraceStart,LedgeTraceEnd);
+
+	if(WalkableSurfaceHit.bBlockingHit && !LedgeTraceHit.bBlockingHit)
+	{
+		return true;
+	}
+
+	return false;
+}

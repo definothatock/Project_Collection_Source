@@ -9,19 +9,29 @@
 
 /* ==================== Declares ==================== */
 
-/* ----- Climb Mode ----- */
+/* ----- Generals and routing ----- */
 
-constexpr float FallBackCapsuleHalfHeight = 96.f;
-
-// Custom movement mode used to identify the climb physics state.
+// Custom movement mode used to identify current movement state.
 UENUM(BlueprintType)
 namespace ECustomMovementMode
 {
 	enum Type
 	{
-		MOVE_Climb UMETA(DisplayName = "Climb Mode")
+		MOVE_Climb			UMETA(DisplayName = "Climb Mode"),
+		MOVE_ClimbLedge		UMETA(DisplayName = "Ledge Climb Mode") // mantle maneuver
 	};
 }
+
+/* ----- Climb Mode ----- */
+
+constexpr float FallBackCapsuleHalfHeight = 96.f;
+
+UENUM(BlueprintType)
+enum class ELedgeClimbMethod : uint8
+{
+	Coded       UMETA(DisplayName = "Coded (Lerp)"),
+	RootMotion  UMETA(DisplayName = "Root Motion (Montage)")
+};
 
 // Delegates from the reference, not doing anything. might want to use Multicast instead.
 DECLARE_DELEGATE(FOnEnterClimbState)
@@ -72,7 +82,7 @@ protected:
 	// Handles entering and exiting the custom climbing movement mode.
 	virtual void OnMovementModeChanged(EMovementMode PreviousMovementMode, uint8 PreviousCustomMode) override;
 
-	// Executes custom "physics" (game-thread logic) When in CustomMode, Runs every *game-tick* (NOT phys-tick!).
+	// Select custom "physics" (game-thread logic) When in CustomMode, Runs every *game-tick* (NOT phys-tick!).
 	virtual void PhysCustom(float deltaTime, int32 Iterations) override;
 
 	// Returns a climb-specific max speed depending on mode
@@ -88,16 +98,18 @@ protected:
 	 * ==================== Climb Movement Mode ====================
 	 * =============================================================
 	 *
-	 *
-	 * Lightweight climbing movement mode, with basic functionality only.
+	 * Climbing movement and its derived modes.
 	 *
 	 * Function:
-	 * - Climbs Surfaces that is at least: available obj type, not too steep, at least eye height.
+	 * - @MOVE_Climb: Climbs Surfaces that is at least: available obj type, not too steep, at least eye height.
+	 * - @MOVE_ClimbLedge: 
 	 *
 	 * Rules:
+	 * @MOVE_Climb:
 	 * - Can start climbing only from grounded state and valid front/eye traces.
 	 * - While climbing, movement speed/acceleration are overridden.
 	 * - Climb exits when surface is invalid or floor is reached while moving down.
+	 * @MOVE_ClimbLedge:
 	 *
 	 * Workflow:
 	 * -
@@ -105,15 +117,16 @@ protected:
 	 * State:
 	 *
 	 * Boundary/Limitation:
+	 * - no specific support for moving platforms yet.
 	 *
 	 * Networking:
 	 * - Initial Check and requests are local, Surface detection and movement application are server-authoritative.
 	 *
 	 * Reference:
 	 * - https://github.com/vinceright3/ClimbSystemSourceCode
-	 *
-	 * Notice:
-	 * All animation related codes were stripped from the original tutorial.
+	 * 
+	 * Note:
+	 * If ever want to make @MOVE_ClimbLedge support moving platforms, check this video: https://www.youtube.com/watch?v=2sLa4z4nOlI
 	 */
 	
 
@@ -131,6 +144,10 @@ public:
 	// Returns true when the current movement mode is the custom climb mode.
 	UFUNCTION(BlueprintPure, Category="CustomMovement|Climbing")
 	bool IsClimbing() const;
+
+	// True while the coded ledge-climb (mantle) maneuver is running.
+	UFUNCTION(BlueprintPure, Category="CustomMovement|Climbing")
+	bool IsLedgeClimbing() const;
 	
 	// Gets the current velocity in local component space before component rotation is applied.
 	UFUNCTION(BlueprintPure, Category="CustomMovement|Climbing")
@@ -160,7 +177,7 @@ private:
 	TArray<FHitResult> DoCapsuleTraceMultiByObject(
 		const FVector& Start,
 		const FVector& End,
-		bool bShowDebugShape = true,
+		bool bShowDebugShape = false,
 		bool bDrawPersistantShapes = false
 	);
 
@@ -168,7 +185,7 @@ private:
 	FHitResult DoLineTraceSingleByObject(
 		const FVector& Start,
 		const FVector& End,
-		bool bShowDebugShape = true,
+		bool bShowDebugShape = false,
 		bool bDrawPersistantShapes = false
 	);
 	
@@ -176,12 +193,10 @@ private:
 	bool TraceClimbableSurfaces();
 
 	// Performs a forward line trace from eye height to validate climb surface reachability.
-	// Does not use ForwardTraceStartOffset.
-	// ISSUE: inconsistent trace Offset across functions. name or unify.
 	FHitResult TraceFromEyeHeight(
 		float TraceDistance,
-		float TraceStartOffset = 0.f,
-		bool bShowDebugShape = true,
+		float TraceStartHeightOffset = 0.f,
+		bool bShowDebugShape = false,
 		bool bDrawPersistantShapes = false
 	);
 	
@@ -194,12 +209,10 @@ private:
 	UFUNCTION(BlueprintCallable, Category="CustomMovement|Climbing")
 	void Auth_ToggleClimbing(bool bEnableClimb);
 	
-	/* ----- Core ----- */
+	/* ----- Climb Core ----- */
 	
 	// Returns true if the character is grounded and a valid climbable surface is detected.
 	bool CanStartClimbing();
-	
-	bool CanClimbDownLedge();
 
 	// Climbing Mode Tigger. Calls OnMovementModeChanged()
 	void StartClimbing();
@@ -207,7 +220,7 @@ private:
 	// Exits climbing mode and transitions to falling.
 	void StopClimbing();
 
-	// Applies climbing movement, rotation, and surface snapping each physics tick.
+	// Applies climbing movement, rotation, and surface snapping each game tick.
 	void PhysClimb(float deltaTime, int32 Iterations);
 
 	// Computes averaged climb surface location and normal from trace hits.
@@ -218,24 +231,41 @@ private:
 
 	// Detects when the character has reached a floor below while descending.
 	bool CheckHasReachedFloor();
-
-	//
-	bool CheckHasReachedLedge();
 	
 	// Interpolates the component rotation to align with the climbable surface.
 	FQuat Climb_CalculateSurfaceAlignedRot(float DeltaTime);
 	
-	// Pushes the character toward the climbable surface to maintain contact.
+	// Estimate distance and pushes the character toward the climbable surface to maintain contact.
 	void Climb_SnapMovementToSurfaces(float DeltaTime);
 
+	// Shared query for ledge-top detection used by both the leading check and target calculation.
+	bool QueryLedgeTopSurface(FHitResult& OutTopSurfaceHit, FVector& OutForwardProbeEnd, bool bDrawDebug = false);
 
+	/* ----- Climb Ledge ----- */
+	
+	// Detects when the character has reached a ledge that can be mantleled up to.
+	bool CheckHasReachedLedge();
+	
+	// Computes the final capsule rest location on top of the ledge.
+	// Returns false if there is no valid, walkable top surface to mantle onto.
+	bool CalcLedgeClimbTarget(FVector& OutLandLocation);
 
+	// Validates the target, builds the L-shaped path and switches into MOVE_LedgeClimb.
+	// Change CMC Configs for walking-surface related things
+	void Auth_TryStartLedgeClimb();
 
+	// Drives the capsule along the precomputed mantle path each physics tick.
+	void PhysLedgeClimb(float deltaTime, int32 Iterations);
+	
+	// Currently not used. Might just let player falls.
+	bool CanClimbDownLedge();
 
 	
 	
 	/* ==================== Runtime State ==================== */
-
+	
+	/* ----- Climb Core ----- */
+	
 	// Latest hits detected from climbable surface traces.
 	// Updated by DoCapsuleTraceMultiByObject().
 	TArray<FHitResult> Climb_ClimableSurfaceMultiTracedResults;
@@ -250,7 +280,20 @@ private:
 	UPROPERTY(Transient)
 	float DefaultCapsuleHalfHeight = 0.f;
 
+	/* ----- Climb Ledge ----- */
 
+	// Cached path points for the active mantle. World space.
+	FVector LedgeClimb_StartLocation    = FVector::ZeroVector; // where we left the wall
+	FVector LedgeClimb_OverLedgeLocation= FVector::ZeroVector; // top of the vertical segment (cleared the lip)
+	FVector LedgeClimb_TargetLocation   = FVector::ZeroVector; // final capsule rest location on the surface
+
+	// Target upright rotation we interp to while mantling (faces across the top surface).
+	FQuat   LedgeClimb_TargetRotation   = FQuat::Identity;
+
+	// Normalised progress 0..1 along the whole maneuver.
+	float   LedgeClimb_Alpha            = 0.f;
+
+	
 	
 	/* ==================== Config ==================== */
 
@@ -281,14 +324,22 @@ private:
 	float Climb_ForwardTraceDistance = 50.f;
 
 	//
-	UPROPERTY(EditDefaultsOnly,BlueprintReadOnly,Category = "Character Movement: Climbing",meta = (AllowPrivateAccess = "true"))
+	UPROPERTY(EditDefaultsOnly,BlueprintReadOnly,Category = "CustomMovement|Climbing|Config",meta = (AllowPrivateAccess = "true"))
 	float Climb_DownWalkableSurfaceTraceOffset = 100.f;
 
 	//
-	UPROPERTY(EditDefaultsOnly,BlueprintReadOnly,Category = "Character Movement: Climbing",meta = (AllowPrivateAccess = "true"))
+	UPROPERTY(EditDefaultsOnly,BlueprintReadOnly,Category = "CustomMovement|Climbing|Config",meta = (AllowPrivateAccess = "true"))
 	float Climb_DownLedgeTraceOffset = 50.f;
 
-	/* ----- Locomotion ----- */
+	/* ----- Climb Core ----- */
+	
+	// Master toggle for the climb debug draws.
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Config", meta=(AllowPrivateAccess="true"))
+	bool bClimb_DebugDraw = true;
+
+	// Master toggle for the climb debug loggings.
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Config", meta=(AllowPrivateAccess="true"))
+	bool bClimb_DebugLog = true;
 
 	// Deceleration used when the climb input is released or when coming to a stop.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Config", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
@@ -302,13 +353,41 @@ private:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Config", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
 	float Climb_MaxAcceleration = 300.f;
 
-	// Maximum allowed acceleration while climbing.
+	//
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Config", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
-	float Climb_MaxSurfaceDegree= 60.f;
+	float Climb_MaxSurfaceNormalFromUp = 60.f;
 	
 	// Capsule half-height applied to the character during climbing.
 	// ANCHOR: Might overlapped with @DefaultCapsuleHalfHeight / should fetch instead of hardcoded.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Config", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
 	float Climb_CapsuleHalfHeight = 48.f;
+	
+	/* ----- Climb Ledge ----- */
 
+	// Total time (seconds) for the whole mantle.
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Config", meta=(AllowPrivateAccess="true", ClampMin="0.05"))
+	float LedgeClimb_Duration = 0.6f;
+
+	// Fraction of the duration spent on the vertical (rise) segment. 0.5 = half up, half over.
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Config", meta=(AllowPrivateAccess="true", ClampMin="0.05", ClampMax="0.95"))
+	float LedgeClimb_PhaseSplit = 0.5f;
+
+	// How far above the top surface the rise segment overshoots, so the lip is cleared before moving forward.
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Config", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
+	float LedgeClimb_VerticalClearance = 30.f;
+
+	// Extra forward distance onto the surface so the capsule lands on solid ground, not the edge.
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Config", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
+	float LedgeClimb_ForwardLandOffset = 40.f;
+
+	// Vertical offset added to the eye-height forward probe used to find the ledge top.
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Config", meta=(AllowPrivateAccess="true"))
+	float LedgeClimb_TopProbeUpOffset = 50.f;
+
+	// How far down we probe from above the lip to find the walkable top surface.
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Config", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
+	float LedgeClimb_TopProbeDownDistance = 150.f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Config", meta=(AllowPrivateAccess="true"))
+	ELedgeClimbMethod LedgeClimbMethod = ELedgeClimbMethod::Coded;
 };
