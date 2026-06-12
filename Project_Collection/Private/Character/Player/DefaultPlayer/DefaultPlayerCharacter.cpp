@@ -23,7 +23,7 @@ ADefaultPlayerCharacter::ADefaultPlayerCharacter(const FObjectInitializer& Objec
 	bUseControllerRotationYaw = false;
 	bUseControllerRotationRoll = false;
 	
-	ClimbingMovementComponent = Cast<UDefaultMovementComponent>(GetCharacterMovement());
+	DefaultMovementComponent = Cast<UDefaultMovementComponent>(GetCharacterMovement());
 
 	// Base walking setup
 	GetCharacterMovement()->bOrientRotationToMovement = true; // cant rotate when not using ControllerRot
@@ -74,7 +74,7 @@ void ADefaultPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerI
 	// Climb toggle
 	if (ClimbAction)
 	{
-		EnhancedInputComponent->BindAction(ClimbAction, ETriggerEvent::Started, this, &ADefaultPlayerCharacter::OnClimbActionStarted);
+		EnhancedInputComponent->BindAction(ClimbAction, ETriggerEvent::Triggered, this, &ADefaultPlayerCharacter::OnClimbActionTriggered);
 	}
 }
 
@@ -84,11 +84,15 @@ void ADefaultPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerI
 
 void ADefaultPlayerCharacter::Request_CustomMovement_Climb()
 {
-	if (!ClimbingMovementComponent)
+	if (!DefaultMovementComponent)
 	{return;}
 
-	const bool bWantsClimb = !ClimbingMovementComponent->IsClimbing();
-	ClimbingMovementComponent->Request_ToggleClimbing(bWantsClimb);
+	const bool bWantsClimb = !DefaultMovementComponent->IsClimbing();
+	
+	UE_LOG(LogTemp, Display, TEXT("Request_CustomMovement_Climb Called | IsClimbing=%d -> bWantsClimb=%d"),
+		DefaultMovementComponent->IsClimbing() ? 1 : 0, bWantsClimb ? 1 : 0);
+	
+	DefaultMovementComponent->Request_ToggleClimbing(bWantsClimb);
 }
 
 
@@ -118,9 +122,9 @@ void ADefaultPlayerCharacter::HandleMoveInput(const FInputActionValue& Value)
 	if (!Controller) return;
 
 	// If climbing: remap input to wall-relative axes.
-	if (ClimbingMovementComponent && ClimbingMovementComponent->IsClimbing())
+	if (DefaultMovementComponent && DefaultMovementComponent->IsClimbing())
 	{
-		const FVector SurfaceNormal = ClimbingMovementComponent->GetClimbableSurfaceNormal();
+		const FVector SurfaceNormal = DefaultMovementComponent->GetClimbableSurfaceNormal();
 
 		const FVector ForwardDirection = FVector::CrossProduct(-SurfaceNormal, GetActorRightVector());
 		const FVector RightDirection   = FVector::CrossProduct(-SurfaceNormal, -GetActorUpVector());
@@ -152,7 +156,7 @@ void ADefaultPlayerCharacter::HandleLookInput(const FInputActionValue& Value)
 }
 
 
-void ADefaultPlayerCharacter::OnClimbActionStarted(const FInputActionValue& Value)
+void ADefaultPlayerCharacter::OnClimbActionTriggered(const FInputActionValue& Value)
 {
 	Request_CustomMovement_Climb();
 }

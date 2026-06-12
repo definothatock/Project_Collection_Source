@@ -135,7 +135,7 @@ public:
 
 	// Climbing Mode Entry Point.
 	UFUNCTION(BlueprintCallable, Category="CustomMovement|Climbing")
-	void Request_ToggleClimbing(bool bEnableClimb);
+	void Request_ToggleClimbing(bool bWantsClimb);
 	
 	
 	
@@ -280,6 +280,15 @@ private:
 	UPROPERTY(Transient)
 	float DefaultCapsuleHalfHeight = 0.f;
 
+
+	// NEW: true while we are bleeding off a high entry velocity after grabbing the
+	// wall from a fall. While true, PhysClimb decelerates Velocity MANUALLY and
+	// ignores player input, so the slide is governed purely by the entry velocity
+	// (CalcVelocity would otherwise clamp us straight down to Climb_MaxSpeed).
+	bool bClimb_IsEntrySliding = false;
+
+	
+
 	/* ----- Climb Ledge ----- */
 
 	// Cached path points for the active mantle. World space.
@@ -361,6 +370,23 @@ private:
 	// ANCHOR: Might overlapped with @DefaultCapsuleHalfHeight / should fetch instead of hardcoded.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Config", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
 	float Climb_CapsuleHalfHeight = 48.f;
+
+
+	
+	// NEW: hard cap on the velocity we carry into the wall when grabbing mid-air.
+	// Stops a huge fall from turning into an absurd slide. Set very high to effectively disable.
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Config", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
+	float Climb_MaxEntrySlideSpeed = 1200.f;
+
+	// NEW: deceleration (u/s^2) applied during the mid-air entry slide. Higher = shorter slide.
+	// Kept separate from Climb_MaxBreakDeceleration so the "caught the wall while falling"
+	// feel can be tuned without touching normal climb braking.
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Config", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
+	float Climb_EntrySlideDeceleration = 900.f;
+
+
+
+	
 	
 	/* ----- Climb Ledge ----- */
 

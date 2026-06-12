@@ -50,7 +50,7 @@ void UDefaultMovementComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 
 void UDefaultMovementComponent::OnMovementModeChanged(EMovementMode PreviousMovementMode, uint8 PreviousCustomMode)
 {
-	// setup climb mode
+// setup climb mode
 	if (IsClimbing())
 	{
 		bOrientRotationToMovement = false;
@@ -58,6 +58,60 @@ void UDefaultMovementComponent::OnMovementModeChanged(EMovementMode PreviousMove
 		if (CharacterOwner && CharacterOwner->GetCapsuleComponent())
 		{
 			CharacterOwner->GetCapsuleComponent()->SetCapsuleHalfHeight(Climb_CapsuleHalfHeight);
+		}
+
+		// --- NEW: mid-air entry slide setup ---
+		// We may be entering from a fall with large velocity. Keep that velocity, but:
+		//  1) project it onto the WALL PLANE (discard the component along the surface
+		//     normal). This makes flying straight INTO a wall stop almost instantly,
+		//     while a glancing/sliding approach keeps its tangential speed -> game-ish.
+		//  2) clamp it to Climb_MaxEntrySlideSpeed so a long fall can't produce a silly slide.
+		// The actual deceleration happens in PhysClimb while bClimb_IsEntrySliding is true.
+
+		// CanStartClimbing() traced the surface but never averaged the normal, so do it now.
+		TraceClimbableSurfaces();
+		ProcessClimableSurfaceInfo();
+
+		const FVector RawEntryVelocity = Velocity;
+		FVector PlaneEntryVelocity = RawEntryVelocity;
+
+		if (!Climb_CurrentSurfaceNormal.IsNearlyZero())
+		{
+			// V - (V . N) * N  -> removes the into/out-of-wall component.
+			PlaneEntryVelocity = FVector::VectorPlaneProject(RawEntryVelocity, Climb_CurrentSurfaceNormal);
+		}
+		else if (bClimb_DebugLog)
+		{
+			// If you see this, the slide direction may be wrong: we had no surface normal
+			// to project against, so we kept the raw velocity (incl. the into-wall part).
+			UE_LOG(LogTemp, Warning, TEXT("[ClimbingMovement] Enter climb - surface normal was ZERO, entry velocity NOT plane-projected. Check trace setup."));
+		}
+
+		if (PlaneEntryVelocity.Size() > Climb_MaxEntrySlideSpeed)
+		{
+			PlaneEntryVelocity = PlaneEntryVelocity.GetSafeNormal() * Climb_MaxEntrySlideSpeed;
+		}
+
+		Velocity = PlaneEntryVelocity;
+
+		// Only engage the manual slide if we're actually faster than a normal climb.
+		// Below that, regular CalcVelocity braking is plenty and we keep input responsive.
+		bClimb_IsEntrySliding = (Velocity.Size() > Climb_MaxSpeed);
+
+		if (bClimb_DebugLog)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("[ClimbingMovement] Enter climb | RawVel=%s (|v|=%.1f) -> PlaneVel=%s (|v|=%.1f) | Normal=%s | EntrySliding=%s"),
+				*RawEntryVelocity.ToString(), RawEntryVelocity.Size(),
+				*Velocity.ToString(), Velocity.Size(),
+				*Climb_CurrentSurfaceNormal.ToString(),
+				bClimb_IsEntrySliding ? TEXT("YES") : TEXT("no"));
+		}
+
+		if (bClimb_DebugDraw && GetWorld() && UpdatedComponent)
+		{
+			// Cyan arrow = the velocity we are entering the wall with (after projection).
+			const FVector Loc = UpdatedComponent->GetComponentLocation();
+			DrawDebugDirectionalArrow(GetWorld(), Loc, Loc + Velocity, 30.f, FColor::Cyan, false, 3.f, 0, 2.f);
 		}
 
 		OnEnter_ClimbStateDelegate.ExecuteIfBound();
@@ -85,6 +139,8 @@ void UDefaultMovementComponent::OnMovementModeChanged(EMovementMode PreviousMove
 		UpdatedComponent->SetRelativeRotation(CleanStandRotation);
 
 		StopMovementImmediately();
+
+		bClimb_IsEntrySliding = false; // NEW: never carry an unfinished entry slide across sessions.	
 
 		OnExit_ClimbStateDelegate.ExecuteIfBound();
 	}
@@ -173,18 +229,19 @@ float UDefaultMovementComponent::GetMaxAcceleration() const
 /* ==================== APIs ==================== */
 
 
-void UDefaultMovementComponent::Request_ToggleClimbing(bool bEnableClimb)
+void UDefaultMovementComponent::Request_ToggleClimbing(bool bWantsClimb)
 {
-	if (!CanStartClimbing())
+	// Client Pre-check before Rpc, Auth_ToggleClimbing will check again
+	if (!CharacterOwner->HasAuthority() || !CanStartClimbing())
 	{return;}
 	
 	if (!CharacterOwner || !CharacterOwner->HasAuthority())
 	{
-		RpcServer_ToggleClimbing(bEnableClimb);
+		RpcServer_ToggleClimbing(bWantsClimb);
 		return;
 	}
 
-	Auth_ToggleClimbing(bEnableClimb);
+	Auth_ToggleClimbing(bWantsClimb);
 }
 
 
@@ -362,7 +419,7 @@ void UDefaultMovementComponent::Auth_ToggleClimbing(bool bEnableClimb)
 		if (CanStartClimbing())
 		{
 			StartClimbing();
-			StopMovementImmediately();
+			// StopMovementImmediately(); // Removed to allow sliding
 		}
 		else
 		{
@@ -379,11 +436,13 @@ void UDefaultMovementComponent::Auth_ToggleClimbing(bool bEnableClimb)
 
 bool UDefaultMovementComponent::CanStartClimbing()
 {
-	// ANCHOR: Planned to allow it, maybe depends on falling speed (then slides)
-	if (IsFalling())
+	// Grabbing the wall while airborne; the high fall velocity is converted into an entry slide on
+	// contact (see OnMovementModeChanged + PhysClimb). No upper speed gate: a fast fall just
+	// produces a longer slide before stopping.
+	if (IsFalling() && bClimb_DebugLog)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[ClimbingMovement] Cannot start climbing - character is falling"));
-		return false;
+		UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] CanStartClimbing - starting from AIR (falling). Entry slide will engage. Velocity=%s (|v|=%.1f)"),
+			*Velocity.ToString(), Velocity.Size());
 	}
 	
 	if (!TraceClimbableSurfaces())
@@ -437,8 +496,59 @@ void UDefaultMovementComponent::PhysClimb(float deltaTime, int32 Iterations)
 		return;
 	}
 
-	// Update Desired @Velocity based on input (later overwrite)
-	CalcVelocity(deltaTime, 0.f, true, Climb_MaxBreakDeceleration);
+
+	
+	// CHANGED: velocity handling now has two paths.
+	//
+	// GATE #3 (the one that quietly eats slides): when input is held, the stock
+	// CalcVelocity() clamps Velocity down to MaxSpeed (Climb_MaxSpeed) within a single
+	// tick. So a 900 u/s entry would instantly become 100 u/s if the player was holding a
+	// direction. To guarantee the slide is driven by the ENTRY velocity, we decelerate
+	// manually here and ignore input until we've bled back down to normal climb speed.
+	if (bClimb_IsEntrySliding)
+	{
+		const float CurrentSpeed = Velocity.Size();
+		const FVector SlideDir = Velocity.GetSafeNormal();
+
+		const float NewSpeed = FMath::Max(0.f, CurrentSpeed - Climb_EntrySlideDeceleration * deltaTime);
+		Velocity = SlideDir * NewSpeed;
+
+		// Re-project onto the (possibly updated) surface plane: the normal can change as
+		// we slide across a curved/segmented wall, and we never want into-wall velocity back.
+		if (!Climb_CurrentSurfaceNormal.IsNearlyZero())
+		{
+			Velocity = FVector::VectorPlaneProject(Velocity, Climb_CurrentSurfaceNormal);
+		}
+
+		if (bClimb_DebugLog)
+		{
+			UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] EntrySlide | speed %.1f -> %.1f (decel %.0f) Vel=%s"),
+				CurrentSpeed, Velocity.Size(), Climb_EntrySlideDeceleration, *Velocity.ToString());
+		}
+
+		if (bClimb_DebugDraw && GetWorld() && UpdatedComponent)
+		{
+			const FVector Loc = UpdatedComponent->GetComponentLocation();
+			DrawDebugDirectionalArrow(GetWorld(), Loc, Loc + Velocity, 25.f, FColor::Orange, false, -1.f, 0, 2.f);
+		}
+
+		// Slide finished -> hand control back to the normal climb model next tick.
+		if (Velocity.Size() <= Climb_MaxSpeed)
+		{
+			bClimb_IsEntrySliding = false;
+			if (bClimb_DebugLog)
+			{
+				UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] EntrySlide COMPLETE -> normal climb control resumed."));
+			}
+		}
+	}
+	else
+	{
+		// Update Desired @Velocity based on input (later overwrite)
+		CalcVelocity(deltaTime, 0.f, true, Climb_MaxBreakDeceleration);
+	}
+
+	
 
 	const FVector OldLocation = UpdatedComponent->GetComponentLocation();
 	const FVector DesiredTickDisplacement = Velocity * deltaTime;
@@ -500,8 +610,8 @@ void UDefaultMovementComponent::ProcessClimableSurfaceInfo()
 	Climb_CurrentSurfaceLocation /= Climb_ClimableSurfaceMultiTracedResults.Num();
 	Climb_CurrentSurfaceNormal = Climb_CurrentSurfaceNormal.GetSafeNormal();
 	
-	UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] ProcessClimableSurfaceInfo - Surface Location: %s, Normal: %s"),
-		*Climb_CurrentSurfaceLocation.ToString(), *Climb_CurrentSurfaceNormal.ToString());
+	// UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] ProcessClimableSurfaceInfo - Surface Location: %s, Normal: %s"),
+	//	*Climb_CurrentSurfaceLocation.ToString(), *Climb_CurrentSurfaceNormal.ToString());
 }
 
 
@@ -577,8 +687,8 @@ void UDefaultMovementComponent::Climb_SnapMovementToSurfaces(float DeltaTime)
 	const FVector SnapToSurfaceVector = -Climb_CurrentSurfaceNormal * DistanceProjectedToForward.Length();
 	const FVector TickSnapAmount = SnapToSurfaceVector * DeltaTime * Climb_MaxSpeed;
 	
-	UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] SnapMovementToClimableSurfaces - SnapVector: %s, FinalSnapAmount: %s"),
-		*SnapToSurfaceVector.ToString(), *TickSnapAmount.ToString());
+	// UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] SnapMovementToClimableSurfaces - SnapVector: %s, FinalSnapAmount: %s"),
+	//	*SnapToSurfaceVector.ToString(), *TickSnapAmount.ToString());
 
 	UpdatedComponent->MoveComponent(
 		TickSnapAmount,
