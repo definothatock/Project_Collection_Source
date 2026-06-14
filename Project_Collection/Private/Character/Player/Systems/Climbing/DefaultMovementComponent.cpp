@@ -26,6 +26,8 @@
 //
 UDefaultMovementComponent::UDefaultMovementComponent()
 {
+	// match walk angle with stop climb angle, with a bit of spare.
+	this->SetWalkableFloorAngle(90.f - Climb_StopClimbAngleFromUpDeg + 5.f);
 }
 
 /* ==================== Overridden Functions ==================== */
@@ -34,7 +36,6 @@ UDefaultMovementComponent::UDefaultMovementComponent()
 void UDefaultMovementComponent::BeginPlay()
 {
 	Super::BeginPlay();
-
 	if (CharacterOwner && CharacterOwner->GetCapsuleComponent())
 	{
 		DefaultCapsuleHalfHeight = CharacterOwner->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
@@ -50,54 +51,66 @@ void UDefaultMovementComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 
 void UDefaultMovementComponent::OnMovementModeChanged(EMovementMode PreviousMovementMode, uint8 PreviousCustomMode)
 {
-// setup climb mode
+	UE_LOG(LogTemp, Warning, TEXT("[ClimbingMovement] OnMovementModeChanged - Current Mode switched to: %s (%hhu)"),
+		*UEnum::GetDisplayValueAsText(MovementMode).ToString(),
+		CustomMovementMode);
+	
+	// CLIMB: ENTER
 	if (IsClimbing())
 	{
-		bOrientRotationToMovement = false;
+		bOrientRotationToMovement = false; // make rotation driven by the surface normal
 
 		if (CharacterOwner && CharacterOwner->GetCapsuleComponent())
 		{
 			CharacterOwner->GetCapsuleComponent()->SetCapsuleHalfHeight(Climb_CapsuleHalfHeight);
 		}
 
-		// --- NEW: mid-air entry slide setup ---
-		// We may be entering from a fall with large velocity. Keep that velocity, but:
-		//  1) project it onto the WALL PLANE (discard the component along the surface
-		//     normal). This makes flying straight INTO a wall stop almost instantly,
-		//     while a glancing/sliding approach keeps its tangential speed -> game-ish.
-		//  2) clamp it to Climb_MaxEntrySlideSpeed so a long fall can't produce a silly slide.
-		// The actual deceleration happens in PhysClimb while bClimb_IsEntrySliding is true.
+		// SLIDING ENTRY
+		// Player may be entering with large velocity. Keep that velocity:
+		// 1. Raw velocity is projected onto the Surface plane, keeping only the tangential speed.
+		//		This makes flying straight INTO a wall stop almost instantly, Game-ish feel.
+		// 2. clamp to Climb_MaxEntrySlideSpeed so a long fall can't produce a crazy slide.
+		//		The actual deceleration happens in PhysClimb() while bClimb_IsEntrySliding is true.
 
-		// CanStartClimbing() traced the surface but never averaged the normal, so do it now.
-		TraceClimbableSurfaces();
-		ProcessClimableSurfaceInfo();
+		// CanStartClimbing() traced the surface but never averaged the normal, now do it again just to make sure.
+		// ANCHOR: improve this flow, seems duplicated.
+		TraceAndCacheClimbableSurfaces();
+		AveragesClimableSurfaceInfo();
 
 		const FVector RawEntryVelocity = Velocity;
 		FVector PlaneEntryVelocity = RawEntryVelocity;
-
+		
 		if (!Climb_CurrentSurfaceNormal.IsNearlyZero())
 		{
-			// V - (V . N) * N  -> removes the into/out-of-wall component.
+			// V - (V . N) * N, removes orthogonal component.
 			PlaneEntryVelocity = FVector::VectorPlaneProject(RawEntryVelocity, Climb_CurrentSurfaceNormal);
 		}
 		else if (bClimb_DebugLog)
 		{
-			// If you see this, the slide direction may be wrong: we had no surface normal
-			// to project against, so we kept the raw velocity (incl. the into-wall part).
 			UE_LOG(LogTemp, Warning, TEXT("[ClimbingMovement] Enter climb - surface normal was ZERO, entry velocity NOT plane-projected. Check trace setup."));
 		}
 
+		// cap speed
 		if (PlaneEntryVelocity.Size() > Climb_MaxEntrySlideSpeed)
 		{
 			PlaneEntryVelocity = PlaneEntryVelocity.GetSafeNormal() * Climb_MaxEntrySlideSpeed;
 		}
 
+		// set Velocity
 		Velocity = PlaneEntryVelocity;
 
-		// Only engage the manual slide if we're actually faster than a normal climb.
-		// Below that, regular CalcVelocity braking is plenty and we keep input responsive.
-		bClimb_IsEntrySliding = (Velocity.Size() > Climb_MaxSpeed);
+		// Flag sliding when faster than a normal climb by this much.
+		bClimb_IsEntrySliding = (Velocity.Size() > Climb_MaxSpeed * SlideEntryOverspeedMultiplier);
 
+		// Kill Velocity when not sliding, let player have the control
+		if (!bClimb_IsEntrySliding)
+		{
+			StopMovementImmediately();
+		}
+		
+		OnEnter_ClimbStateDelegate.ExecuteIfBound();
+		
+		// --- Debug: sliding state and data ---
 		if (bClimb_DebugLog)
 		{
 			UE_LOG(LogTemp, Warning, TEXT("[ClimbingMovement] Enter climb | RawVel=%s (|v|=%.1f) -> PlaneVel=%s (|v|=%.1f) | Normal=%s | EntrySliding=%s"),
@@ -106,22 +119,18 @@ void UDefaultMovementComponent::OnMovementModeChanged(EMovementMode PreviousMove
 				*Climb_CurrentSurfaceNormal.ToString(),
 				bClimb_IsEntrySliding ? TEXT("YES") : TEXT("no"));
 		}
-
-		if (bClimb_DebugDraw && GetWorld() && UpdatedComponent)
+		if (bClimb_DebugDraw && bClimb_IsEntrySliding && GetWorld() && UpdatedComponent)
 		{
-			// Cyan arrow = the velocity we are entering the wall with (after projection).
+			// the velocity we are entering the surface with (after projection).
 			const FVector Loc = UpdatedComponent->GetComponentLocation();
 			DrawDebugDirectionalArrow(GetWorld(), Loc, Loc + Velocity, 30.f, FColor::Cyan, false, 3.f, 0, 2.f);
 		}
-
-		OnEnter_ClimbStateDelegate.ExecuteIfBound();
+		
 	}
 
-	// Clean up climb mode.
-	// NOTE: skip this when we are transitioning Climb -> LedgeClimb (both are MOVE_Custom).
-	// We must NOT restore the full capsule / reset rotation in the middle of the mantle;
-	// the small climb capsule is intentionally kept for lip clearance, and cleanup happens
-	// only when the mantle itself finishes (see the LedgeClimb block below).
+	// CLIMB: EXIT
+	// Skipped when transitioning Climb -> LedgeClimb.
+	// Full capsule / reset rotation is skipped; until the mantle finished.
 	if (PreviousMovementMode == MOVE_Custom
 		&& PreviousCustomMode == ECustomMovementMode::MOVE_Climb
 		&& !IsLedgeClimbing())
@@ -137,17 +146,15 @@ void UDefaultMovementComponent::OnMovementModeChanged(EMovementMode PreviousMove
 		const FRotator DirtyRotation = UpdatedComponent->GetComponentRotation();
 		const FRotator CleanStandRotation = FRotator(0.f, DirtyRotation.Yaw, 0.f);
 		UpdatedComponent->SetRelativeRotation(CleanStandRotation);
-
-		StopMovementImmediately();
-
-		bClimb_IsEntrySliding = false; // NEW: never carry an unfinished entry slide across sessions.	
+		
+		bClimb_IsEntrySliding = false;
 
 		OnExit_ClimbStateDelegate.ExecuteIfBound();
 	}
 
-	// NEW: clean up after the coded ledge-climb (mantle) finishes.
-	// Restoring the capsule here (with the target centred at surface + full half-height)
+	// CLIMB: EXIT LEDGE
 	// makes the feet land exactly on the surface with no pop.
+	// ANCHOR: Significant overlapping with MOVE_Climb. Consider combined.
 	if (PreviousMovementMode == MOVE_Custom
 		&& PreviousCustomMode == ECustomMovementMode::MOVE_ClimbLedge)
 	{
@@ -184,7 +191,6 @@ void UDefaultMovementComponent::PhysCustom(float deltaTime, int32 Iterations)
 		return;
 	}
 	
-	// NEW: run the coded mantle physics when in the ledge-climb mode.
 	if (IsLedgeClimbing())
 	{
 		PhysLedgeClimb(deltaTime, Iterations);
@@ -222,6 +228,16 @@ float UDefaultMovementComponent::GetMaxAcceleration() const
  * =============================================================
  * ==================== Climb Movement Mode ====================
  * =============================================================
+ *
+ * TODO:
+ * - Convert ClimbEdge to vaulting. Bad player experience when they cant just skip the standard climbing to ClimbEdge.
+ * - Add Climb Hop, allowing player to climb faster.
+ * - Change the walkable edge detection to simple edge detection. Up to player to decide where they wanna go,
+ * or vault into.
+ * - When leaving from standard climb, rotation is instantly snapped upright;
+ * fix from code (preferred) or visually from animation.
+ * - TraceAndCacheClimbableSurfaces() and AveragesClimableSurfaceInfo() seems to be using everywhere. Check again
+ * if there are needs for that many check.
  */
 
 
@@ -231,10 +247,29 @@ float UDefaultMovementComponent::GetMaxAcceleration() const
 
 void UDefaultMovementComponent::Request_ToggleClimbing(bool bWantsClimb)
 {
-	// Client Pre-check before Rpc, Auth_ToggleClimbing will check again
-	if (!CharacterOwner->HasAuthority() || !CanStartClimbing())
-	{return;}
-	
+	if (bClimb_DebugLog)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[ClimbingMovement] >> Request_ToggleClimbing(enable=%d) | LocalRole=%d HasAuth=%d Mode=%d Custom=%d IsClimbing=%d IsFalling=%d"),
+			bWantsClimb ? 1 : 0,
+			CharacterOwner ? (int32)CharacterOwner->GetLocalRole() : -1,
+			(CharacterOwner && CharacterOwner->HasAuthority()) ? 1 : 0,
+			(int32)MovementMode, (int32)CustomMovementMode,
+			IsClimbing() ? 1 : 0, IsFalling() ? 1 : 0);
+
+		// Uncomment to dump the C++ call stack and find the exact second caller:
+		// FDebug::DumpStackTraceToLog(ELogVerbosity::Log);
+	}
+
+	// CHANGED: only the ENABLE path may be gated by CanStartClimbing().
+	// Stopping must ALWAYS be permitted. The old universal gate "worked" only because
+	// CanStartClimbing() early-returned false while IsFalling(); removing that early-out
+	// (for midair climb) exposed this. Disable is now unconditional.
+	if (bWantsClimb && !CanStartClimbing())
+	{
+		return;
+	}
+
 	if (!CharacterOwner || !CharacterOwner->HasAuthority())
 	{
 		RpcServer_ToggleClimbing(bWantsClimb);
@@ -283,6 +318,7 @@ TArray<FHitResult> UDefaultMovementComponent::DoCapsuleTraceMultiByObject(
 	bool bDrawPersistantShapes
 )
 {
+	bShowDebugShape = bShowDebugShape && bClimb_MasterDebugTrace;
 	TArray<FHitResult> OutCapsuleTraceHitResults;
 
 	EDrawDebugTrace::Type DebugTraceType = EDrawDebugTrace::None;
@@ -327,7 +363,7 @@ FHitResult UDefaultMovementComponent::DoLineTraceSingleByObject(
 	EDrawDebugTrace::Type DebugTraceType = EDrawDebugTrace::None;
 	if (bShowDebugShape)
 	{
-		DebugTraceType = bDrawPersistantShapes ? EDrawDebugTrace::Persistent : EDrawDebugTrace::ForOneFrame;
+		DebugTraceType = bDrawPersistantShapes ? EDrawDebugTrace::Persistent : EDrawDebugTrace::ForDuration;
 	}
 
 	if (ClimbableSurfaceTraceTypes.IsEmpty())
@@ -363,24 +399,6 @@ FHitResult UDefaultMovementComponent::DoLineTraceSingleByObject(
 }
 
 
-bool UDefaultMovementComponent::TraceClimbableSurfaces()
-{
-	const FVector StartOffset = UpdatedComponent->GetForwardVector() * Climb_ForwardTraceStartOffset;
-	const FVector Start = UpdatedComponent->GetComponentLocation() + StartOffset;
-	const FVector End = Start + UpdatedComponent->GetForwardVector() * Climb_ForwardTraceDistance;
-
-	Climb_ClimableSurfaceMultiTracedResults = DoCapsuleTraceMultiByObject(Start, End);
-	const bool bFoundSurfaces = !Climb_ClimableSurfaceMultiTracedResults.IsEmpty();
-	
-	if (!bFoundSurfaces)
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[ClimbingMovement] TraceClimbableSurfaces - No surfaces found (check ClimbableSurfaceTraceTypes configuration)"));
-	}
-	
-	return bFoundSurfaces;
-}
-
-
 FHitResult UDefaultMovementComponent::TraceFromEyeHeight(
 	float TraceDistance,
 	float TraceStartHeightOffset,
@@ -403,11 +421,55 @@ FHitResult UDefaultMovementComponent::TraceFromEyeHeight(
 	return DoLineTraceSingleByObject(Start, End, bShowDebugShape, bDrawPersistantShapes);
 }
 
+
+bool UDefaultMovementComponent::TraceAndCacheClimbableSurfaces()
+{
+	const FVector StartOffset = UpdatedComponent->GetForwardVector() * Climb_ForwardTraceStartOffset;
+	const FVector Start = UpdatedComponent->GetComponentLocation() + StartOffset;
+	const FVector End = Start + UpdatedComponent->GetForwardVector() * Climb_ForwardTraceDistance;
+
+	Climb_ClimableSurfaceMultiTracedResults = DoCapsuleTraceMultiByObject(Start, End);
+	const bool bFoundSurfaces = !Climb_ClimableSurfaceMultiTracedResults.IsEmpty();
+	
+	if (!bFoundSurfaces)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ClimbingMovement] TraceClimbableSurfaces - No surfaces found (check ClimbableSurfaceTraceTypes configuration)"));
+	}
+	
+	return bFoundSurfaces;
+}
+
+
+bool UDefaultMovementComponent::TraceLedgeTopSurface(FHitResult& OutTopSurfaceHit, FVector& OutForwardProbeEnd, bool bDrawDebug)
+{
+	const FHitResult ForwardClearHit = TraceFromEyeHeight(Climb_EyeHeightTraceDistance, LedgeClimb_TopProbeUpOffset, bDrawDebug);
+
+	if (ForwardClearHit.bBlockingHit)
+	{
+		return false;
+	}
+
+	OutForwardProbeEnd = ForwardClearHit.TraceEnd;
+
+	const FVector DownVector = -UpdatedComponent->GetUpVector();
+	const FVector DownEnd = OutForwardProbeEnd + DownVector * LedgeClimb_TopProbeDownDistance;
+
+	OutTopSurfaceHit = DoLineTraceSingleByObject(OutForwardProbeEnd, DownEnd, bDrawDebug);
+	return OutTopSurfaceHit.bBlockingHit;
+}
+
+
 /* ----- Core ----- */
 
 
 void UDefaultMovementComponent::RpcServer_ToggleClimbing_Implementation(bool bEnableClimb)
 {
+	if (bClimb_DebugLog)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[ClimbingMovement] >> RpcServer_ToggleClimbing(enable=%d) received on server | Mode=%d Custom=%d"),
+			bEnableClimb ? 1 : 0, (int32)MovementMode, (int32)CustomMovementMode);
+	}
+	
 	Auth_ToggleClimbing(bEnableClimb);
 }
 
@@ -416,10 +478,23 @@ void UDefaultMovementComponent::Auth_ToggleClimbing(bool bEnableClimb)
 {
 	if (bEnableClimb)
 	{
+		// Reject Toggle that arrives right after a manual exit climb.
+		// NOTE: This was used to patch double entry. Later cause was found to be BP & Cpp double input.
+		//			Keep as this is a decent safeguard. 
+		const double Now = (GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0);
+		if (Climb_ReEntryLockoutSeconds > 0.f
+			&& Climb_LastManualStopTime >= 0.0
+			&& (Now - Climb_LastManualStopTime) < Climb_ReEntryLockoutSeconds)
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[ClimbingMovement] Auth_ToggleClimbing(true) REJECTED - within re-entry lockout (%.3fs since manual stop). This is the spurious restart being blocked."),
+				Now - Climb_LastManualStopTime);
+			return;
+		}
+
 		if (CanStartClimbing())
 		{
 			StartClimbing();
-			// StopMovementImmediately(); // Removed to allow sliding
 		}
 		else
 		{
@@ -429,6 +504,10 @@ void UDefaultMovementComponent::Auth_ToggleClimbing(bool bEnableClimb)
 	else
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[ClimbingMovement] ToggleClimbing(false) - stopping climb"));
+
+		// Refresh safeguard
+		Climb_LastManualStopTime = (GetWorld() ? GetWorld()->GetTimeSeconds() : 0.0);
+
 		StopClimbing();
 	}
 }
@@ -436,16 +515,14 @@ void UDefaultMovementComponent::Auth_ToggleClimbing(bool bEnableClimb)
 
 bool UDefaultMovementComponent::CanStartClimbing()
 {
-	// Grabbing the wall while airborne; the high fall velocity is converted into an entry slide on
-	// contact (see OnMovementModeChanged + PhysClimb). No upper speed gate: a fast fall just
-	// produces a longer slide before stopping.
+
 	if (IsFalling() && bClimb_DebugLog)
 	{
 		UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] CanStartClimbing - starting from AIR (falling). Entry slide will engage. Velocity=%s (|v|=%.1f)"),
 			*Velocity.ToString(), Velocity.Size());
 	}
 	
-	if (!TraceClimbableSurfaces())
+	if (!TraceAndCacheClimbableSurfaces())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[ClimbingMovement] Cannot start climbing - no climbable surfaces detected in forward trace"));
 		return false;
@@ -486,8 +563,8 @@ void UDefaultMovementComponent::PhysClimb(float deltaTime, int32 Iterations)
 	{return;}
 
 	// Cache States
-	TraceClimbableSurfaces();
-	ProcessClimableSurfaceInfo();
+	TraceAndCacheClimbableSurfaces();
+	AveragesClimableSurfaceInfo();
 
 	// Check should stop climbing
 	if (CheckShouldStopClimbing() || CheckHasReachedFloor())
@@ -498,15 +575,14 @@ void UDefaultMovementComponent::PhysClimb(float deltaTime, int32 Iterations)
 
 
 	
-	// CHANGED: velocity handling now has two paths.
-	//
-	// GATE #3 (the one that quietly eats slides): when input is held, the stock
-	// CalcVelocity() clamps Velocity down to MaxSpeed (Climb_MaxSpeed) within a single
-	// tick. So a 900 u/s entry would instantly become 100 u/s if the player was holding a
-	// direction. To guarantee the slide is driven by the ENTRY velocity, we decelerate
-	// manually here and ignore input until we've bled back down to normal climb speed.
+	// Desired Velocity handling
 	if (bClimb_IsEntrySliding)
 	{
+		// Issue: when input is held, the stock CalcVelocity() clamps Velocity down to Climb_MaxSpeed within a tick;
+		// So a fast entry would instantly become capped if the player was holding a direction.
+		// To guarantee the slide is driven by the ENTRY velocity,
+		// uses separate deceleration and ignores move inputs, until @Velocity bled down to normal climb speed.
+		
 		const float CurrentSpeed = Velocity.Size();
 		const FVector SlideDir = Velocity.GetSafeNormal();
 
@@ -532,9 +608,10 @@ void UDefaultMovementComponent::PhysClimb(float deltaTime, int32 Iterations)
 			DrawDebugDirectionalArrow(GetWorld(), Loc, Loc + Velocity, 25.f, FColor::Orange, false, -1.f, 0, 2.f);
 		}
 
-		// Slide finished -> hand control back to the normal climb model next tick.
-		if (Velocity.Size() <= Climb_MaxSpeed)
+		// Slide finished; flag back to the normal Desired Velocity handling next tick.
+		if (Velocity.Size() <= Climb_MaxSpeed * SlideEntryOverspeedMultiplier)
 		{
+			StopMovementImmediately();
 			bClimb_IsEntrySliding = false;
 			if (bClimb_DebugLog)
 			{
@@ -544,12 +621,13 @@ void UDefaultMovementComponent::PhysClimb(float deltaTime, int32 Iterations)
 	}
 	else
 	{
-		// Update Desired @Velocity based on input (later overwrite)
+		// unreal standard calling; Update Desired @Velocity based on input
 		CalcVelocity(deltaTime, 0.f, true, Climb_MaxBreakDeceleration);
 	}
 
 	
-
+	// Resolve movement using current Velocity
+	
 	const FVector OldLocation = UpdatedComponent->GetComponentLocation();
 	const FVector DesiredTickDisplacement = Velocity * deltaTime;
 	FHitResult Hit(1.f);
@@ -564,17 +642,15 @@ void UDefaultMovementComponent::PhysClimb(float deltaTime, int32 Iterations)
 		SlideAlongSurface(DesiredTickDisplacement, (1.f - Hit.Time), Hit.Normal, Hit, true);
 	}
 
-	// Rewrite @Velocity to actual movement
+	// Update Final Velocity after manual-triggering Resolving
 	Velocity = (UpdatedComponent->GetComponentLocation() - OldLocation) / deltaTime;
 
 	// Snap movement to climbable surface
 	Climb_SnapMovementToSurfaces(deltaTime);
 
 
-	// NEW: when we climb into the top lip while moving up, hand off to the coded mantle.
-	// TryStartLedgeClimb() switches movement mode, after which
-	// IsClimbing() becomes false and PhysClimb stops running (no repeated triggering).
-	if (CheckHasReachedLedge())
+	// Heads to MOVE_ClimbLedge
+	if (CheckReachingLedge())
 	{
 		if (LedgeClimbMethod == ELedgeClimbMethod::RootMotion)
 		{
@@ -589,7 +665,7 @@ void UDefaultMovementComponent::PhysClimb(float deltaTime, int32 Iterations)
 }
 
 
-void UDefaultMovementComponent::ProcessClimableSurfaceInfo()
+void UDefaultMovementComponent::AveragesClimableSurfaceInfo()
 {
 	Climb_CurrentSurfaceLocation = FVector::ZeroVector;
 	Climb_CurrentSurfaceNormal = FVector::ZeroVector;
@@ -610,7 +686,7 @@ void UDefaultMovementComponent::ProcessClimableSurfaceInfo()
 	Climb_CurrentSurfaceLocation /= Climb_ClimableSurfaceMultiTracedResults.Num();
 	Climb_CurrentSurfaceNormal = Climb_CurrentSurfaceNormal.GetSafeNormal();
 	
-	// UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] ProcessClimableSurfaceInfo - Surface Location: %s, Normal: %s"),
+	// UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] AveragesClimableSurfaceInfo() - Surface Location: %s, Normal: %s"),
 	//	*Climb_CurrentSurfaceLocation.ToString(), *Climb_CurrentSurfaceNormal.ToString());
 }
 
@@ -629,7 +705,7 @@ bool UDefaultMovementComponent::CheckShouldStopClimbing()
 	const float DegreeDiff = FMath::RadiansToDegrees(FMath::Acos(DotResult));
 
 	// Surface too horizontal => stop climb.
-	return DegreeDiff <= Climb_MaxSurfaceNormalFromUp;	
+	return DegreeDiff <= Climb_StopClimbAngleFromUpDeg;	
 }
 
 
@@ -698,34 +774,15 @@ void UDefaultMovementComponent::Climb_SnapMovementToSurfaces(float DeltaTime)
 }
 
 
-bool UDefaultMovementComponent::QueryLedgeTopSurface(FHitResult& OutTopSurfaceHit, FVector& OutForwardProbeEnd, bool bDrawDebug)
-{
-	const FHitResult ForwardClearHit = TraceFromEyeHeight(Climb_EyeHeightTraceDistance, LedgeClimb_TopProbeUpOffset, bDrawDebug);
-
-	if (ForwardClearHit.bBlockingHit)
-	{
-		return false;
-	}
-
-	OutForwardProbeEnd = ForwardClearHit.TraceEnd;
-
-	const FVector DownVector = -UpdatedComponent->GetUpVector();
-	const FVector DownEnd = OutForwardProbeEnd + DownVector * LedgeClimb_TopProbeDownDistance;
-
-	OutTopSurfaceHit = DoLineTraceSingleByObject(OutForwardProbeEnd, DownEnd, bDrawDebug);
-	return OutTopSurfaceHit.bBlockingHit;
-}
-
-
 /* ----- Climb Ledge ----- */
 
 
-bool UDefaultMovementComponent::CheckHasReachedLedge()
+bool UDefaultMovementComponent::CheckReachingLedge()
 {
 	FHitResult TopSurfaceHit;
 	FVector ForwardProbeEnd;
 
-	if (QueryLedgeTopSurface(TopSurfaceHit, ForwardProbeEnd, false) && GetLocalSpaceVelocity().Z > 10.f)
+	if (TraceLedgeTopSurface(TopSurfaceHit, ForwardProbeEnd, false) && GetLocalSpaceVelocity().Z > 10.f)
 	{
 		return true;
 	}
@@ -744,14 +801,17 @@ bool UDefaultMovementComponent::CalcLedgeClimbTarget(FVector& OutLandLocation)
 	FHitResult TopSurfaceHit;
 	FVector ForwardProbeEnd;
 
-	// check again to cache data //ANCHOR: might
-	if (!QueryLedgeTopSurface(TopSurfaceHit, ForwardProbeEnd, bClimb_DebugDraw))
+	// check again to cache data
+	// ANCHOR: might want to remove? State change from PhysClimb() already called CheckHasReachedLedge(),
+	// which called TraceLedgeTopSurface().
+	if (!TraceLedgeTopSurface(TopSurfaceHit, ForwardProbeEnd, bClimb_DebugDraw))
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[ClimbingMovement] CalcLedgeClimbTarget - no top surface found below the lip."));
 		return false;
 	}
 
 	// Reject surfaces that are too steep to stand on (e.g. a slanted underside).
+	// ANCHOR: Maybe allow it later. If player slides, let it be; player cant tell if walkable or not until they tried
 	const float SurfaceDotUp = FVector::DotProduct(TopSurfaceHit.ImpactNormal, FVector::UpVector);
 	if (SurfaceDotUp < GetWalkableFloorZ()) // CMC setting
 	{
@@ -761,26 +821,38 @@ bool UDefaultMovementComponent::CalcLedgeClimbTarget(FVector& OutLandLocation)
 	}
 
 	// Build the final capsule rest location
-	// - Use the FULL default half-height (not the shrunk climb height) so that when the capsule is restored on
-	// mantle exit, the feet sit on the surface.
+	// - Use the default half-height (not the shrunk climb height) to make sure there is enough room
 	// - Push forward onto the surface so we don't land balancing on the edge.
+	// ANCHOR: make player stand near-edge to allow player to vault over a wall
 	const float FullHalfHeight = (DefaultCapsuleHalfHeight > 0.f) ? DefaultCapsuleHalfHeight : FallBackCapsuleHalfHeight;
 
-	// Horizontal "into the surface" direction (the way we travel onto the top).
+	// Horizontal Forward
 	FVector HorizForward = -Climb_CurrentSurfaceNormal;
 	HorizForward.Z = 0.f;
+	
+	// Fallback
 	if (!HorizForward.Normalize())
 	{
-		// Fallback if the surface normal was near-vertical/degenerate.
 		HorizForward = UpdatedComponent->GetForwardVector();
 		HorizForward.Z = 0.f;
 		HorizForward.Normalize();
 	}
 
-	OutLandLocation =
-		TopSurfaceHit.ImpactPoint
-		+ FVector::UpVector * (FullHalfHeight + 2.f)      // +2 skin to avoid starting embedded
-		+ HorizForward * LedgeClimb_ForwardLandOffset;
+	// Use the capsule's horizontal (XY) position but take Z from the top surface hit
+	const FVector CapsuleLoc = UpdatedComponent->GetComponentLocation();
+	const FVector Up = UpdatedComponent->GetUpVector();
+
+	// Add extra forward push equal to 2 * capsule radius (in addition to configured offset)
+	float CapsuleRadius = 0.f;
+	if (CharacterOwner && CharacterOwner->GetCapsuleComponent())
+	{
+		CapsuleRadius = CharacterOwner->GetCapsuleComponent()->GetUnscaledCapsuleRadius();
+	}
+	const float ForwardPush = LedgeClimb_ForwardLandOffset + 2.f * CapsuleRadius;
+
+	OutLandLocation = FVector(CapsuleLoc.X, CapsuleLoc.Y, TopSurfaceHit.ImpactPoint.Z)
+		+ Up * (FullHalfHeight + 2.f)      // +2 padding to avoid embedded into ground
+		+ HorizForward * ForwardPush;
 
 	UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] CalcLedgeClimbTarget - land location: %s"), *OutLandLocation.ToString());
 	return true;
@@ -805,12 +877,13 @@ void UDefaultMovementComponent::Auth_TryStartLedgeClimb()
 		return;
 	}
 
-	// --- Build the L-shaped path ---
+	// Build the L-shaped path
 	// Start: where we currently are on the wall.
 	// OverLedge: straight up from Start, to just above the target surface (+clearance) so the lip is cleared.
 	// Target: the final rest spot on top.
-	LedgeClimb_StartLocation    = UpdatedComponent->GetComponentLocation();
-	LedgeClimb_TargetLocation   = LandLocation;
+	LedgeClimb_StartLocation = UpdatedComponent->GetComponentLocation();
+	LedgeClimb_TargetLocation = LandLocation;
+	
 	LedgeClimb_OverLedgeLocation = FVector(
 		LedgeClimb_StartLocation.X,
 		LedgeClimb_StartLocation.Y,
@@ -829,7 +902,7 @@ void UDefaultMovementComponent::Auth_TryStartLedgeClimb()
 
 	LedgeClimb_Alpha = 0.f;
 
-	// --- Debug: draw the whole planned path so you can eyeball it against the geometry ---
+	// --- Debug: draw planned path ---
 	if (bClimb_DebugDraw && GetWorld())
 	{
 		DrawDebugSphere(GetWorld(), LedgeClimb_StartLocation,     12.f, 12, FColor::Green,  false, 4.f);
@@ -856,12 +929,12 @@ void UDefaultMovementComponent::PhysLedgeClimb(float deltaTime, int32 Iterations
 		return;
 	}
 
-	// Advance normalized progress.
+	// normalization to duration
 	LedgeClimb_Alpha += deltaTime / FMath::Max(LedgeClimb_Duration, KINDA_SMALL_NUMBER);
 	const float ClampedAlpha = FMath::Clamp(LedgeClimb_Alpha, 0.f, 1.f);
 
-	// --- Pick the point on the two-segment path for this alpha ---
-	// Segment 1 (0 .. PhaseSplit):   Start      -> OverLedge   (rise, clear the lip)
+	// Lerp progression
+	// Segment 1 (0 .. PhaseSplit):   Start      -> OverLedge   (rise, over the edge tip)
 	// Segment 2 (PhaseSplit .. 1):   OverLedge  -> Target      (move over and settle)
 	FVector DesiredLocation;
 	if (ClampedAlpha <= LedgeClimb_PhaseSplit)
@@ -875,23 +948,20 @@ void UDefaultMovementComponent::PhysLedgeClimb(float deltaTime, int32 Iterations
 		DesiredLocation = FMath::Lerp(LedgeClimb_OverLedgeLocation, LedgeClimb_TargetLocation, SegAlpha);
 	}
 
-	// Delta from the capsule's ACTUAL location (not the ideal), so if a previous tick got
-	// blocked we naturally try to catch up next tick instead of drifting.
+	// Delta from the capsule's ACTUAL location instead of ideal math, so if a previous tick got
+	// blocked, tries to catch up next tick instead of drifting.
 	const FVector CurrentLocation = UpdatedComponent->GetComponentLocation();
 	const FVector MoveDelta = DesiredLocation - CurrentLocation;
 
 	// Interp rotation toward the upright "on top" facing.
 	const FQuat NewQuat = FMath::QInterpTo(UpdatedComponent->GetComponentQuat(), LedgeClimb_TargetRotation, deltaTime, 5.f);
 
-	// Swept move: respects collision. If our math sends the capsule into geometry, it stops
-	// here (and we log/draw) rather than tunneling — that's your debugging signal.
 	FHitResult Hit(1.f);
 	SafeMoveUpdatedComponent(MoveDelta, NewQuat, true, Hit);
 
+	// If math sends the capsule into geometry, it stops to avoid tunneling
 	if (Hit.IsValidBlockingHit())
 	{
-		// Don't fight the wall; just report it. If you see this firing a lot, increase
-		// LedgeClimb_VerticalClearance or your trace offsets.
 		UE_LOG(LogTemp, Warning, TEXT("[ClimbingMovement] PhysLedgeClimb BLOCKED at alpha %.2f by %s (normal %s)"),
 			ClampedAlpha, *GetNameSafe(Hit.GetActor()), *Hit.Normal.ToString());
 
@@ -901,7 +971,7 @@ void UDefaultMovementComponent::PhysLedgeClimb(float deltaTime, int32 Iterations
 		}
 	}
 
-	// Keep Velocity coherent for anything reading it (anim/UI), based on what actually moved.
+	// Update Velocity after manual-triggering move
 	Velocity = (UpdatedComponent->GetComponentLocation() - CurrentLocation) / deltaTime;
 
 	// --- Debug: current desired vs actual ---

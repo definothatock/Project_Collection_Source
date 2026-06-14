@@ -57,6 +57,7 @@ void ADefaultPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerI
 	// Jump
 	if (JumpAction)
 	{
+		// ANCHOR: have not map the IA and Mapping in Bp yet.
 		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Triggered, this, &ACharacter::Jump);
 		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &ACharacter::StopJumping);
 	}
@@ -88,10 +89,6 @@ void ADefaultPlayerCharacter::Request_CustomMovement_Climb()
 	{return;}
 
 	const bool bWantsClimb = !DefaultMovementComponent->IsClimbing();
-	
-	UE_LOG(LogTemp, Display, TEXT("Request_CustomMovement_Climb Called | IsClimbing=%d -> bWantsClimb=%d"),
-		DefaultMovementComponent->IsClimbing() ? 1 : 0, bWantsClimb ? 1 : 0);
-	
 	DefaultMovementComponent->Request_ToggleClimbing(bWantsClimb);
 }
 
