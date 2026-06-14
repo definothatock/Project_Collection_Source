@@ -589,8 +589,8 @@ void UDefaultMovementComponent::PhysClimb(float deltaTime, int32 Iterations)
 		const float NewSpeed = FMath::Max(0.f, CurrentSpeed - Climb_EntrySlideDeceleration * deltaTime);
 		Velocity = SlideDir * NewSpeed;
 
-		// Re-project onto the (possibly updated) surface plane: the normal can change as
-		// we slide across a curved/segmented wall, and we never want into-wall velocity back.
+		// Re-project onto the (possibly updated) surface plane;
+		// Surface normal changes while sliding across a curved/segmented wall, into-wall velocity opted out entirely.
 		if (!Climb_CurrentSurfaceNormal.IsNearlyZero())
 		{
 			Velocity = FVector::VectorPlaneProject(Velocity, Climb_CurrentSurfaceNormal);
@@ -627,14 +627,11 @@ void UDefaultMovementComponent::PhysClimb(float deltaTime, int32 Iterations)
 
 	
 	// Resolve movement using current Velocity
-	
 	const FVector OldLocation = UpdatedComponent->GetComponentLocation();
 	const FVector DesiredTickDisplacement = Velocity * deltaTime;
 	FHitResult Hit(1.f);
-
 	// Tries to move (climb) and rotate to Desired values
 	SafeMoveUpdatedComponent(DesiredTickDisplacement, Climb_CalculateSurfaceAlignedRot(deltaTime), true, Hit);
-	
 	if (Hit.Time < 1.f)
 	{
 		// Unreal resolve impact and slide
