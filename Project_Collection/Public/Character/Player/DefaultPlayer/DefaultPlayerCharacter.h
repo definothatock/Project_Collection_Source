@@ -38,7 +38,7 @@ public:
 protected:
 	// Cached typed movement component (custom climb movement).
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Movement", meta=(AllowPrivateAccess="true"))
-	TObjectPtr<UDefaultMovementComponent> ClimbingMovementComponent;
+	TObjectPtr<UDefaultMovementComponent> DefaultMovementComponent;
 
 	
 	
@@ -73,7 +73,7 @@ public:
 	/* ==================== Queries ==================== */
 	
 	UFUNCTION(BlueprintPure, Category="Movement|Climbing")
-	UDefaultMovementComponent* GetClimbingMovementComponent() const { return ClimbingMovementComponent; }
+	UDefaultMovementComponent* GetClimbingMovementComponent() const { return DefaultMovementComponent; }
 
 	
 
@@ -89,7 +89,7 @@ private:
 	void HandleMoveInput(const FInputActionValue& Value);
 	
 	void HandleLookInput(const FInputActionValue& Value);
-	void OnClimbActionStarted(const FInputActionValue& Value);
+	void OnClimbActionTriggered(const FInputActionValue& Value);
 	
 
 	
