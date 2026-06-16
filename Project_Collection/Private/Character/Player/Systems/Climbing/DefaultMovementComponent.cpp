@@ -26,8 +26,6 @@
 //
 UDefaultMovementComponent::UDefaultMovementComponent()
 {
-	// match walk angle with stop climb angle, with a bit of spare.
-	this->SetWalkableFloorAngle(90.f - Climb_StopClimbAngleFromUpDeg + 5.f);
 }
 
 /* ==================== Overridden Functions ==================== */
@@ -39,6 +37,8 @@ void UDefaultMovementComponent::BeginPlay()
 	if (CharacterOwner && CharacterOwner->GetCapsuleComponent())
 	{
 		DefaultCapsuleHalfHeight = CharacterOwner->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
+		// match walk angle with stop climb angle, with a bit of spare.
+		// this->SetWalkableFloorAngle(90.f - Climb_StopClimbAngleFromUpDeg + 5.f);
 	}
 }
 
@@ -46,6 +46,9 @@ void UDefaultMovementComponent::BeginPlay()
 void UDefaultMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+	
+	// NEW
+	TickExitUprightBlend(DeltaTime);
 }
 
 
@@ -59,6 +62,10 @@ void UDefaultMovementComponent::OnMovementModeChanged(EMovementMode PreviousMove
 	if (IsClimbing())
 	{
 		bOrientRotationToMovement = false; // make rotation driven by the surface normal
+
+		// NEW
+		Climb_TimeSinceEntered = 0.f;
+		bClimb_ExitUprightBlendActive = false;
 
 		if (CharacterOwner && CharacterOwner->GetCapsuleComponent())
 		{
@@ -135,7 +142,7 @@ void UDefaultMovementComponent::OnMovementModeChanged(EMovementMode PreviousMove
 		&& PreviousCustomMode == ECustomMovementMode::MOVE_Climb
 		&& !IsLedgeClimbing())
 	{
-		bOrientRotationToMovement = true;
+		// bOrientRotationToMovement = true;
 
 		if (CharacterOwner && CharacterOwner->GetCapsuleComponent())
 		{
@@ -143,9 +150,12 @@ void UDefaultMovementComponent::OnMovementModeChanged(EMovementMode PreviousMove
 			CharacterOwner->GetCapsuleComponent()->SetCapsuleHalfHeight(RestoreHalfHeight);
 		}
 
-		const FRotator DirtyRotation = UpdatedComponent->GetComponentRotation();
-		const FRotator CleanStandRotation = FRotator(0.f, DirtyRotation.Yaw, 0.f);
-		UpdatedComponent->SetRelativeRotation(CleanStandRotation);
+		// const FRotator DirtyRotation = UpdatedComponent->GetComponentRotation();
+		// const FRotator CleanStandRotation = FRotator(0.f, DirtyRotation.Yaw, 0.f);
+		// UpdatedComponent->SetRelativeRotation(CleanStandRotation);
+
+		// NEW
+		ExitUprightBlend();       // smooth pitch/roll to 0
 		
 		bClimb_IsEntrySliding = false;
 
@@ -188,6 +198,10 @@ void UDefaultMovementComponent::PhysCustom(float deltaTime, int32 Iterations)
 	if (IsClimbing())
 	{
 		PhysClimb(deltaTime, Iterations);
+
+		// NEW
+		Climb_TimeSinceEntered += deltaTime;
+
 		return;
 	}
 	
@@ -230,14 +244,21 @@ float UDefaultMovementComponent::GetMaxAcceleration() const
  * =============================================================
  *
  * TODO:
- * - Convert ClimbEdge to vaulting. Bad player experience when they cant just skip the standard climbing to ClimbEdge.
- * - Add Climb Hop, allowing player to climb faster.
- * - Change the walkable edge detection to simple edge detection. Up to player to decide where they wanna go,
+ * 1. Convert ClimbEdge to vaulting. Bad player experience when they cant just skip the standard climbing to ClimbEdge.
+ * 2. Add Climb Hop, allowing player to climb faster.
+ * 3. Change the walkable edge detection to simple edge detection. Up to player to decide where they wanna go,
  * or vault into.
- * - When leaving from standard climb, rotation is instantly snapped upright;
- * fix from code (preferred) or visually from animation.
- * - TraceAndCacheClimbableSurfaces() and AveragesClimableSurfaceInfo() seems to be using everywhere. Check again
+ * 4. When exiting from climb, should push player forward a bit, to make sure player wont slide down the slope.
+ * 
+ * 7. TraceAndCacheClimbableSurfaces() and AveragesClimableSurfaceInfo() seems to be using everywhere. Check again
  * if there are needs for that many check.
+ * 8. When tracing multisurface, if some objects have bad overlaps (eg a corner with asset overlapping each other),
+ * The orientation snapping would orient to the overlapping area and cause stuttering until moved far enough
+ * 9. Exit lock is not implemented
+ * 
+ * Note:
+ * - @UpdatedComponent for movement/rotation/traces; CharacterOwner->GetCapsuleComponent() for query/APIs. This how
+ *		CMC works internally, safer.
  */
 
 
@@ -261,10 +282,7 @@ void UDefaultMovementComponent::Request_ToggleClimbing(bool bWantsClimb)
 		// FDebug::DumpStackTraceToLog(ELogVerbosity::Log);
 	}
 
-	// CHANGED: only the ENABLE path may be gated by CanStartClimbing().
-	// Stopping must ALWAYS be permitted. The old universal gate "worked" only because
-	// CanStartClimbing() early-returned false while IsFalling(); removing that early-out
-	// (for midair climb) exposed this. Disable is now unconditional.
+	
 	if (bWantsClimb && !CanStartClimbing())
 	{
 		return;
@@ -316,7 +334,7 @@ TArray<FHitResult> UDefaultMovementComponent::DoCapsuleTraceMultiByObject(
 	const FVector& End,
 	bool bShowDebugShape,
 	bool bDrawPersistantShapes
-)
+) const
 {
 	bShowDebugShape = bShowDebugShape && bClimb_MasterDebugTrace;
 	TArray<FHitResult> OutCapsuleTraceHitResults;
@@ -346,8 +364,6 @@ TArray<FHitResult> UDefaultMovementComponent::DoCapsuleTraceMultiByObject(
 		false
 	);
 	
-	// UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] DoCapsuleTraceMultiByObject - Found %d hits"), OutCapsuleTraceHitResults.Num());
-
 	return OutCapsuleTraceHitResults;
 }
 
@@ -356,7 +372,7 @@ FHitResult UDefaultMovementComponent::DoLineTraceSingleByObject(
 	const FVector& End,
 	bool bShowDebugShape,
 	bool bDrawPersistantShapes
-)
+) const
 {
 	FHitResult OutHit;
 
@@ -382,18 +398,6 @@ FHitResult UDefaultMovementComponent::DoLineTraceSingleByObject(
 		OutHit,
 		false
 	);
-	
-	/*
-	if (OutHit.bBlockingHit)
-	{
-		UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] DoLineTraceSingleByObject - Hit actor: %s at location: %s"),
-			*GetNameSafe(OutHit.GetActor()), *OutHit.ImpactPoint.ToString());
-	}
-	else
-	{
-		UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] DoLineTraceSingleByObject - No hit detected"));
-	}
-	*/
 
 	return OutHit;
 }
@@ -404,7 +408,7 @@ FHitResult UDefaultMovementComponent::TraceFromEyeHeight(
 	float TraceStartHeightOffset,
 	bool bShowDebugShape,
 	bool bDrawPersistantShapes
-)
+) const
 {
 	if (!CharacterOwner)
 	{
@@ -744,30 +748,44 @@ FQuat UDefaultMovementComponent::Climb_CalculateSurfaceAlignedRot(float DeltaTim
 }
 
 
+
 void UDefaultMovementComponent::Climb_SnapMovementToSurfaces(float DeltaTime)
 {
+	if (!UpdatedComponent || Climb_CurrentSurfaceNormal.IsNearlyZero())
+	{
+		return;
+	}
+	
 	const FVector ComponentForward = UpdatedComponent->GetForwardVector();
 	const FVector ComponentWrldLoc = UpdatedComponent->GetComponentLocation();
-
+	
 	const FVector RelativeDistance = Climb_CurrentSurfaceLocation - ComponentWrldLoc;
 
 	// Estimate how far the surface point is along player forward (not the true perpendicular distance).
-	const FVector DistanceProjectedToForward =
-		(RelativeDistance).ProjectOnTo(ComponentForward);
+	const float ForwardDistance = FVector::DotProduct(RelativeDistance, ComponentForward);
+	if (ForwardDistance <= 0.f)
+	{
+		return;
+	}
 
-	// Move toward the surface along the inward normal by the estimated distance.
-	// ignoring length signs because it is impossible to climb on your back.
-	const FVector SnapToSurfaceVector = -Climb_CurrentSurfaceNormal * DistanceProjectedToForward.Length();
-	const FVector TickSnapAmount = SnapToSurfaceVector * DeltaTime * Climb_MaxSpeed;
-	
-	// UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] SnapMovementToClimableSurfaces - SnapVector: %s, FinalSnapAmount: %s"),
-	//	*SnapToSurfaceVector.ToString(), *TickSnapAmount.ToString());
+	const FVector DesiredSnap = -Climb_CurrentSurfaceNormal * ForwardDistance;
 
-	UpdatedComponent->MoveComponent(
-		TickSnapAmount,
-		UpdatedComponent->GetComponentQuat(),
-		true
-	);
+	// Entry ramp
+	float EntryAlpha = 1.f;
+	if (Climb_EntryWallSnapBlendTime > 0.f)
+	{
+		if (Climb_TimeSinceEntered < Climb_EntryWallSnapBlendTime)
+		{
+			EntryAlpha = Climb_TimeSinceEntered / Climb_EntryWallSnapBlendTime;
+		}
+	}
+
+	const float SnapSpeed = FMath::Lerp(Climb_EntryWallSnapSpeed, Climb_WallSnapSpeed, EntryAlpha);
+	const FVector TickSnapAmount = DesiredSnap.GetClampedToMaxSize(SnapSpeed * DeltaTime);
+
+	FHitResult SnapHit(1.f);
+	SafeMoveUpdatedComponent(TickSnapAmount, UpdatedComponent->GetComponentQuat(), true, SnapHit);
+
 }
 
 
@@ -936,12 +954,12 @@ void UDefaultMovementComponent::PhysLedgeClimb(float deltaTime, int32 Iterations
 	FVector DesiredLocation;
 	if (ClampedAlpha <= LedgeClimb_PhaseSplit)
 	{
-		const float SegAlpha = ClampedAlpha / LedgeClimb_PhaseSplit;
+		const float SegAlpha = FMath::InterpEaseOut(0.f, 1.f, ClampedAlpha / LedgeClimb_PhaseSplit, 1.2f);
 		DesiredLocation = FMath::Lerp(LedgeClimb_StartLocation, LedgeClimb_OverLedgeLocation, SegAlpha);
 	}
 	else
 	{
-		const float SegAlpha = (ClampedAlpha - LedgeClimb_PhaseSplit) / (1.f - LedgeClimb_PhaseSplit);
+		const float SegAlpha = FMath::InterpEaseIn(0.f, 1.f, (ClampedAlpha - LedgeClimb_PhaseSplit) / (1.f - LedgeClimb_PhaseSplit), 1.2f);
 		DesiredLocation = FMath::Lerp(LedgeClimb_OverLedgeLocation, LedgeClimb_TargetLocation, SegAlpha);
 	}
 
@@ -1013,4 +1031,50 @@ bool UDefaultMovementComponent::CanClimbDownLedge()
 	}
 
 	return false;
+}
+
+
+/* ----- Climb Exit ----- */
+
+
+void UDefaultMovementComponent::ExitUprightBlend()
+{
+	if (!UpdatedComponent)
+	{
+		return;
+	}
+
+	const FRotator Dirty = UpdatedComponent->GetComponentRotation();
+	Climb_ExitUprightTargetQuat = FRotator(0.f, Dirty.Yaw, 0.f).Quaternion();
+
+	if (Climb_ExitUprightInterpSpeed <= 0.f)
+	{
+		UpdatedComponent->SetWorldRotation(Climb_ExitUprightTargetQuat);
+		bClimb_ExitUprightBlendActive = false;
+		bOrientRotationToMovement = true;
+		return;
+	}
+
+	bClimb_ExitUprightBlendActive = true;
+	bOrientRotationToMovement = false;
+}
+
+
+void UDefaultMovementComponent::TickExitUprightBlend(float DeltaTime)
+{
+	if (!bClimb_ExitUprightBlendActive || !UpdatedComponent)
+	{
+		return;
+	}
+
+	const FQuat Current = UpdatedComponent->GetComponentQuat();
+	const FQuat Next = FMath::QInterpTo(Current, Climb_ExitUprightTargetQuat, DeltaTime, Climb_ExitUprightInterpSpeed);
+	UpdatedComponent->SetWorldRotation(Next);
+
+	if (Next.Equals(Climb_ExitUprightTargetQuat, 0.0025f))
+	{
+		UpdatedComponent->SetWorldRotation(Climb_ExitUprightTargetQuat);
+		bClimb_ExitUprightBlendActive = false;
+		bOrientRotationToMovement = true;
+	}
 }

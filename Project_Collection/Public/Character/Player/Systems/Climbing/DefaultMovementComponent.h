@@ -95,35 +95,84 @@ protected:
 	 * ==================== Climb Movement Mode ====================
 	 * =============================================================
 	 *
-	 * Climbing movement and its derived modes.
+	 * Climbing movement and derived custom modes.
 	 *
-	 * Function:
-	 * - @MOVE_Climb: Climbs Surfaces that is at least: available obj type, not too steep, at least eye height.
-	 * - @MOVE_ClimbLedge: 
+	 * Modes:
+	 * - @MOVE_Climb
+	 *   Wall-climb locomotion on valid climbable surfaces.
+	 * - @MOVE_ClimbLedge
+	 *   Ledge mantle transition (coded L-path). RootMotion option is declared but not implemented yet.
 	 *
-	 * Rules:
-	 * @MOVE_Climb:
-	 * - Can start climbing only from grounded state and valid front/eye traces.
-	 * - While climbing, movement speed/acceleration are overridden.
-	 * - Climb exits when surface is invalid or floor is reached while moving down.
-	 * @MOVE_ClimbLedge:
+	 * -----------------------------------------------------------------
+	 * Quick State Flow (authoritative path)
+	 * -----------------------------------------------------------------
+	 * Request_ToggleClimbing(true)
+	 *	-> (Client) RpcServer_ToggleClimbing(true)
+	 *	-> Auth_ToggleClimbing(true)
+	 *		-> Re-entry lockout check
+	 *		-> CanStartClimbing()
+	 *			- forward capsule trace hits climbable object type
+	 *			- eye-height forward trace hits
+	 *		-> StartClimbing()
+	 *			- SetMovementMode(MOVE_Custom, MOVE_Climb)
 	 *
-	 * Workflow:
-	 * -
-	 * 
-	 * State:
+	 * MOVE_Climb (PhysClimb each tick)
+	 *	-> TraceAndCacheClimbableSurfaces()
+	 *	-> AveragesClimableSurfaceInfo()
+	 *	-> Stop if:
+	 *		- surface invalid / too horizontal (CheckShouldStopClimbing), or
+	 *		- floor reached while descending (CheckHasReachedFloor)
+	 *	-> Movement:
+	 *		- entry slide decel (high-speed catch), OR normal CalcVelocity
+	 *		- SafeMoveUpdatedComponent + SlideAlongSurface
+	 *		- Snap toward wall (Climb_SnapMovementToSurfaces)
+	 *	-> If ledge detected (CheckReachingLedge):
+	 *		- Auth_TryStartLedgeClimb()
+	 *		- SetMovementMode(MOVE_Custom, MOVE_ClimbLedge)
 	 *
-	 * Boundary/Limitation:
-	 * - no specific support for moving platforms yet.
+	 * MOVE_ClimbLedge (PhysLedgeClimb each tick)
+	 *	-> Move Start -> OverLedge -> Target (time-normalized lerp)
+	 *	-> Interp to upright target rotation
+	 *	-> On completion: SetMovementMode(MOVE_Walking)
 	 *
-	 * Networking:
-	 * - Initial Check and requests are local, Surface detection and movement application are server-authoritative.
+	 * Request_ToggleClimbing(false)
+	 *	-> Auth_ToggleClimbing(false) -> StopClimbing() -> MOVE_Falling
+	 *
+	 * -----------------------------------------------------------------
+	 * Rules / Behavior
+	 * -----------------------------------------------------------------
+	 * - Start is allowed from ground OR air (midair grab supported), if traces are valid.
+	 * - Climb mode overrides max speed/acceleration.
+	 * - Entering climb with high velocity can trigger entry slide bleed-off.
+	 * - Capsule half-height shrinks during climb and is restored on exit.
+	 * - Climb and ledge use the same climb session enter/exit delegates.
+	 *
+	 * -----------------------------------------------------------------
+	 * State Side Effects (OnMovementModeChanged)
+	 * -----------------------------------------------------------------
+	 * - Enter MOVE_Climb:
+	 *		disable orient-to-movement, shrink capsule, initialize slide/session state.
+	 * - Exit MOVE_Climb (except when transitioning to MOVE_ClimbLedge):
+	 *		restore capsule, restore upright rotation policy, clear slide state.
+	 * - Exit MOVE_ClimbLedge:
+	 *		restore capsule + upright rotation, stop residual velocity.
+	 *
+	 * -----------------------------------------------------------------
+	 * Networking
+	 * -----------------------------------------------------------------
+	 * - Input intent can be requested locally.
+	 * - Start/stop authority, trace validation, and movement mode transitions are server-authoritative.
+	 *
+	 * -----------------------------------------------------------------
+	 * Boundary / Limitations
+	 * -----------------------------------------------------------------
+	 * - No dedicated moving-platform support for climb/ledge yet.
+	 * - RootMotion ledge climb path is declared but currently unimplemented.
+	 * - Some trace calls are intentionally duplicated for safety; can be consolidated later.
 	 *
 	 * Reference:
 	 * - https://github.com/vinceright3/ClimbSystemSourceCode
-	 * 
-	 * Note:
-	 * If ever want to make @MOVE_ClimbLedge support moving platforms, check this video: https://www.youtube.com/watch?v=2sLa4z4nOlI
+	 * - Moving platform note (future): https://www.youtube.com/watch?v=2sLa4z4nOlI
 	 */
 	
 
@@ -176,7 +225,7 @@ private:
 		const FVector& End,
 		bool bShowDebugShape = false,
 		bool bDrawPersistantShapes = false
-	);
+	) const;
 
 	// Performs a single line trace against climbable object types and returns the first hit.
 	FHitResult DoLineTraceSingleByObject(
@@ -184,7 +233,7 @@ private:
 		const FVector& End,
 		bool bShowDebugShape = false,
 		bool bDrawPersistantShapes = false
-	);
+	) const;
 
 	// Performs a forward line trace from eye height to validate climb surface reachability.
 	FHitResult TraceFromEyeHeight(
@@ -192,10 +241,9 @@ private:
 		float TraceStartHeightOffset = 0.f,
 		bool bShowDebugShape = true,
 		bool bDrawPersistantShapes = false
-	);
+	) const;
 	
-	// Traces forward for climbable surfaces and stores the results.
-	// Starts from @UpdatedComponent (Character Capsule).
+	// Traces forward for climbable surfaces and stores the results; from @UpdatedComponent (Character Capsule).
 	bool TraceAndCacheClimbableSurfaces();
 
 	// Call TraceFromEyeHeight() and test if there is a surface at the end of Eye Trace 
@@ -263,7 +311,12 @@ private:
 	// Currently not used. Might just let player falls.
 	bool CanClimbDownLedge();
 
+
+	/* ----- Climb Exit ----- */
+
+	void ExitUprightBlend();
 	
+	void TickExitUprightBlend(float DeltaTime);
 	
 	/* ==================== Runtime State ==================== */
 	
@@ -310,7 +363,18 @@ private:
 
 	// Normalised progress 0..1 along the whole maneuver.
 	float LedgeClimb_Alpha = 0.f;
+	
 
+	/* ----- Climb Exit ----- */
+
+	//
+	float Climb_TimeSinceEntered = BIG_NUMBER;
+
+	// Toggle for graduated exit-climb upright.
+	bool bClimb_ExitUprightBlendActive = false;
+
+	// Target rotation for the exit upright blend.
+	FQuat Climb_ExitUprightTargetQuat = FQuat::Identity;
 	
 	
 	/* ==================== Config ==================== */
@@ -388,7 +452,26 @@ private:
 	// ANCHOR: Might overlapped with @DefaultCapsuleHalfHeight / should fetch instead of hardcoded.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
 	float Climb_CapsuleHalfHeight = 48.f;
+	
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
+	float Climb_ExitUprightInterpSpeed = 12.f;
 
+	
+	/* ----- Climb Wall Snapping ----- */
+
+	// Time spend in Lerping entry snap from entry to contant speed. set 0 to disable.
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Attach", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
+	float Climb_EntryWallSnapBlendTime = 0.15f;
+	
+	// Snap entering speed.
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Attach", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
+	float Climb_EntryWallSnapSpeed = 200.f;
+
+	// Snap contant speed.
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Attach", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
+	float Climb_WallSnapSpeed = 500.f;
+
+	
 	/* ----- Climb Entry Slide ----- */
 	
 	// Hard cap on the velocity carried into climbing.
@@ -403,7 +486,7 @@ private:
 	// Deceleration (u/s^2) applied during the entry slide.
 	// NOT the same with, Climb_MaxBreakDeceleration, this is about "caught the wall while falling"
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Slide", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
-	float Climb_EntrySlideDeceleration = 900.f;
+	float Climb_EntrySlideDeceleration = 1200.f;
 
 	// Spamming safeguard; ANCHOR: implement later.
 	// Save player from "panicked spam" after success.
@@ -435,7 +518,7 @@ private:
 
 	// Vertical offset added to the eye-height forward probe used to find the ledge top.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|LedgeClimb", meta=(AllowPrivateAccess="true"))
-	float LedgeClimb_TopProbeUpOffset = 50.f;
+	float LedgeClimb_TopProbeUpOffset = -50.f;
 
 	// How far down we probe from above the lip to find the walkable top surface.
 	// ANCHOR: Consider change this to Full capsule height with a bit of padding.
