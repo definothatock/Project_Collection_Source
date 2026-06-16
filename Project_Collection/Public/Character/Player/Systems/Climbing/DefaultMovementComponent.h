@@ -223,7 +223,7 @@ private:
 	TArray<FHitResult> DoCapsuleTraceMultiByObject(
 		const FVector& Start,
 		const FVector& End,
-		bool bShowDebugShape = false,
+		bool bShowDebugShape = true,
 		bool bDrawPersistantShapes = false
 	) const;
 
@@ -398,7 +398,7 @@ private:
 	// Distance for the eye-level forward trace used to validate climbable surfaces.
 	// ANCHOR: Should Change to trace frm camera later.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Tracing", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
-	float Climb_EyeHeightTraceDistance = 100.f;
+	float Climb_EyeForwardTraceDistance = 100.f;
 
 	// Distance to offset the start of the forward climb trace from the character.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Tracing", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
@@ -406,7 +406,7 @@ private:
 
 	// Forward distance used to search for climbable surfaces.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Tracing", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
-	float Climb_ForwardTraceDistance = 50.f;
+	float Climb_ComponentForwardTraceDistance = 50.f;
 
 	//
 	UPROPERTY(EditDefaultsOnly,BlueprintReadOnly,Category = "CustomMovement|Climbing|Tracing",meta = (AllowPrivateAccess = "true"))
@@ -518,7 +518,7 @@ private:
 
 	// Vertical offset added to the eye-height forward probe used to find the ledge top.
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|LedgeClimb", meta=(AllowPrivateAccess="true"))
-	float LedgeClimb_TopProbeUpOffset = -50.f;
+	float LedgeClimb_EyeHeightOffset = -10.f;
 
 	// How far down we probe from above the lip to find the walkable top surface.
 	// ANCHOR: Consider change this to Full capsule height with a bit of padding.
