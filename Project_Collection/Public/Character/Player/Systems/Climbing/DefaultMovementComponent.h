@@ -18,6 +18,7 @@ namespace ECustomMovementMode
 	enum Type
 	{
 		MOVE_Climb			UMETA(DisplayName = "Climb Mode"),
+		MOVE_RopeClimb     UMETA(DisplayName="Rope Climb Mode"),
 		MOVE_ClimbLedge		UMETA(DisplayName = "Ledge Climb Mode") // mantle maneuver
 	};
 }
@@ -40,13 +41,17 @@ DECLARE_DELEGATE(FOnExitClimbState)
 
 
 /*
- * Custom Movement Component with climbing movement mode.
+ * Custom Movement Component with climbing movement mode
  *
  * Function:
  * -
  *
  * 
  * State:
+ *
+ *
+ * Note:
+ * Component is set Replicated to broadcast some necessary runtime data.
  *
  *
  * TODO:
@@ -76,11 +81,13 @@ protected:
 	
 	virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+	
 	// Handles entering and exiting the custom climbing movement mode.
 	virtual void OnMovementModeChanged(EMovementMode PreviousMovementMode, uint8 PreviousCustomMode) override;
 
 	// Select custom "physics" (game-thread logic) When in CustomMode, Runs every *game-tick* (NOT phys-tick!).
-	virtual void PhysCustom(float deltaTime, int32 Iterations) override;
+	virtual void PhysCustom(float DeltaTime, int32 Iterations) override;
 
 	// Returns a climb-specific max speed depending on mode
 	virtual float GetMaxSpeed() const override;
@@ -92,16 +99,18 @@ protected:
 	
 	/**
 	 * =============================================================
-	 * ==================== Climb Movement Mode ====================
+	 * ==================== Climbing Movement Modes ====================
 	 * =============================================================
 	 *
-	 * Climbing movement and derived custom modes.
+	 * Climbing locomotion and related custom modes (wall, ledge, rope).
 	 *
 	 * Modes:
-	 * - @MOVE_Climb
-	 *   Wall-climb locomotion on valid climbable surfaces.
-	 * - @MOVE_ClimbLedge
-	 *   Ledge mantle transition (coded L-path). RootMotion option is declared but not implemented yet.
+	 * - MOVE_Climb
+	 *   Wall-climb locomotion — used when the character is attached to a climbable surface.
+	 * - MOVE_ClimbLedge
+	 *   Ledge / mantle transition (coded L-path). RootMotion option is declared but not implemented.
+	 * - MOVE_RopeClimb
+	 *   Planned rope-climb mode (declared but not implemented).
 	 *
 	 * -----------------------------------------------------------------
 	 * Quick State Flow (authoritative path)
@@ -272,7 +281,7 @@ private:
 	void StopClimbing();
 
 	// Applies climbing movement, rotation, and surface snapping each game tick.
-	void PhysClimb(float deltaTime, int32 Iterations);
+	void PhysClimb(float DeltaTime, int32 Iterations);
 
 	// Computes averaged climb surface location and normal from trace hits.
 	void AveragesClimableSurfaceInfo();
@@ -290,6 +299,13 @@ private:
 	void Climb_SnapMovementToSurfaces(float DeltaTime);
 	
 
+	/* ----- CLimb Spline ----- */
+
+	// NEW: planning to support climbing ropes.
+	// Having overhanging climb and vertical climb be the same state or?
+
+
+
 	/* ----- Climb Ledge ----- */
 	
 	// Detects when the character has reached a ledge that can be mantled up to.
@@ -306,7 +322,7 @@ private:
 
 	// Drives the capsule along the path from CalcLedgeClimbTarget(); each game tick.
 	// Lerp up, then forward; use @LedgeClimb_PhaseSplit to segregate progress.
-	void PhysLedgeClimb(float deltaTime, int32 Iterations);
+	void PhysLedgeClimb(float DeltaTime, int32 Iterations);
 	
 	// Currently not used. Might just let player falls.
 	bool CanClimbDownLedge();
@@ -345,21 +361,39 @@ private:
 	// Timestamp (world seconds) of the last MANUAL climb stop. Used to reject an
 	// immediate re-entry during the brief Falling window right after toggling off.
 	double Climb_LastManualStopTime = -1.0;
+
+
+	/* ----- CLimb Spline ----- */
+
+
+
 	
 
 	/* ----- Climb Ledge ----- */
+	/*
+	 * Content in this section are replicated for client to perform CMC velocity prediction to
+	 * specific destinations (the L-shape).
+	 */
 
 	// World space of where the ClimbLedge starts
-	FVector LedgeClimb_StartLocation = FVector::ZeroVector;
+	UPROPERTY(Replicated)
+	FVector_NetQuantize10  LedgeClimb_StartLocation = FVector::ZeroVector;
 
-	// World space of 
-	FVector LedgeClimb_OverLedgeLocation = FVector::ZeroVector;
+	// World space of
+	UPROPERTY(Replicated)
+	FVector_NetQuantize10  LedgeClimb_OverLedgeLocation = FVector::ZeroVector;
 
 	 // final capsule rest location on the surface
-	FVector LedgeClimb_TargetLocation = FVector::ZeroVector;
+	UPROPERTY(Replicated)
+	FVector_NetQuantize10  LedgeClimb_TargetLocation = FVector::ZeroVector;
 
 	// Target upright rotation we interp to while mantling (faces across the top surface).
+	UPROPERTY(Replicated)
 	FQuat LedgeClimb_TargetRotation = FQuat::Identity;
+
+	// server-authored start time used by all peers to compute same alpha
+	UPROPERTY(Replicated)
+	float LedgeClimb_ServerStartTime = -1.f;
 
 	// Normalised progress 0..1 along the whole maneuver.
 	float LedgeClimb_Alpha = 0.f;

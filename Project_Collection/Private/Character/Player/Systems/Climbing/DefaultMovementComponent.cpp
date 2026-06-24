@@ -8,6 +8,9 @@
 #include "Kismet/KismetSystemLibrary.h"
 #include "Kismet/KismetMathLibrary.h"
 
+#include "Net/UnrealNetwork.h"
+#include "GameFramework/GameStateBase.h"
+
 #include "DrawDebugHelpers.h"
 
 
@@ -49,6 +52,18 @@ void UDefaultMovementComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 	
 	// NEW
 	TickExitUprightBlend(DeltaTime);
+}
+
+
+void UDefaultMovementComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME(UDefaultMovementComponent, LedgeClimb_StartLocation);
+	DOREPLIFETIME(UDefaultMovementComponent, LedgeClimb_OverLedgeLocation);
+	DOREPLIFETIME(UDefaultMovementComponent, LedgeClimb_TargetLocation);
+	DOREPLIFETIME(UDefaultMovementComponent, LedgeClimb_TargetRotation);
+	DOREPLIFETIME(UDefaultMovementComponent, LedgeClimb_ServerStartTime);
 }
 
 
@@ -162,7 +177,7 @@ void UDefaultMovementComponent::OnMovementModeChanged(EMovementMode PreviousMove
 		OnExit_ClimbStateDelegate.ExecuteIfBound();
 	}
 
-	// CLIMB: EXIT LEDGE
+	// CLIMB: LEDGE
 	// makes the feet land exactly on the surface with no pop.
 	// ANCHOR: Significant overlapping with MOVE_Climb. Consider combined.
 	if (PreviousMovementMode == MOVE_Custom
@@ -193,25 +208,25 @@ void UDefaultMovementComponent::OnMovementModeChanged(EMovementMode PreviousMove
 }
 
 
-void UDefaultMovementComponent::PhysCustom(float deltaTime, int32 Iterations)
+void UDefaultMovementComponent::PhysCustom(float DeltaTime, int32 Iterations)
 {
 	if (IsClimbing())
 	{
-		PhysClimb(deltaTime, Iterations);
+		PhysClimb(DeltaTime, Iterations);
 
 		// NEW
-		Climb_TimeSinceEntered += deltaTime;
+		Climb_TimeSinceEntered += DeltaTime;
 
 		return;
 	}
 	
 	if (IsLedgeClimbing())
 	{
-		PhysLedgeClimb(deltaTime, Iterations);
+		PhysLedgeClimb(DeltaTime, Iterations);
 		return;
 	}
 
-	Super::PhysCustom(deltaTime, Iterations);
+	Super::PhysCustom(DeltaTime, Iterations);
 }
 
 
@@ -244,17 +259,20 @@ float UDefaultMovementComponent::GetMaxAcceleration() const
  * =============================================================
  *
  * TODO:
- * 1. Convert ClimbEdge to vaulting. Bad player experience when they cant just skip the standard climbing to ClimbEdge.
- * 2. Add Climb Hop, allowing player to climb faster.
- * 3. Change the walkable edge detection to simple edge detection. Up to player to decide where they wanna go,
- * or vault into.
- * 4. When exiting from climb, should push player forward a bit, to make sure player wont slide down the slope.
  * 
- * 7. TraceAndCacheClimbableSurfaces() and AveragesClimableSurfaceInfo() seems to be using everywhere. Check again
+ * - Convert ClimbEdge to vaulting. Bad player experience when they cant just skip the standard climbing to ClimbEdge.
+ * - Add Climb Hop, allowing player to climb faster.
+ * - Change the walkable edge detection to simple edge detection. Up to player to decide where they wanna go,
+ * or vault into.
+ * - When exiting from climb, should push player forward a bit, to make sure player wont slide down the slope.
+ * 
+ * - TraceAndCacheClimbableSurfaces() and AveragesClimableSurfaceInfo() seems to be using everywhere. Check again
  * if there are needs for that many check.
- * 8. When tracing multisurface, if some objects have bad overlaps (eg a corner with asset overlapping each other),
+ * - When tracing multisurface, if some objects have bad overlaps (eg a corner with asset overlapping each other),
  * The orientation snapping would orient to the overlapping area and cause stuttering until moved far enough
- * 9. Exit lock is not implemented
+ * - Exit lock is not implemented
+ *
+ * -
  * 
  * Note:
  * - @UpdatedComponent for movement/rotation/traces; CharacterOwner->GetCapsuleComponent() for query/APIs. This how
@@ -561,9 +579,9 @@ void UDefaultMovementComponent::StopClimbing()
 }
 
 
-void UDefaultMovementComponent::PhysClimb(float deltaTime, int32 Iterations)
+void UDefaultMovementComponent::PhysClimb(float DeltaTime, int32 Iterations)
 {
-	if (deltaTime < MIN_TICK_TIME)
+	if (DeltaTime < MIN_TICK_TIME)
 	{return;}
 
 	// Cache States
@@ -590,7 +608,7 @@ void UDefaultMovementComponent::PhysClimb(float deltaTime, int32 Iterations)
 		const float CurrentSpeed = Velocity.Size();
 		const FVector SlideDir = Velocity.GetSafeNormal();
 
-		const float NewSpeed = FMath::Max(0.f, CurrentSpeed - Climb_EntrySlideDeceleration * deltaTime);
+		const float NewSpeed = FMath::Max(0.f, CurrentSpeed - Climb_EntrySlideDeceleration * DeltaTime);
 		Velocity = SlideDir * NewSpeed;
 
 		// Re-project onto the (possibly updated) surface plane;
@@ -626,28 +644,28 @@ void UDefaultMovementComponent::PhysClimb(float deltaTime, int32 Iterations)
 	else
 	{
 		// unreal standard calling; Update Desired @Velocity based on input
-		CalcVelocity(deltaTime, 0.f, true, Climb_MaxBreakDeceleration);
+		CalcVelocity(DeltaTime, 0.f, true, Climb_MaxBreakDeceleration);
 	}
 
 	
 	// Resolve movement using current Velocity
 	const FVector OldLocation = UpdatedComponent->GetComponentLocation();
-	const FVector DesiredTickDisplacement = Velocity * deltaTime;
+	const FVector DesiredTickDisplacement = Velocity * DeltaTime;
 	FHitResult Hit(1.f);
 	// Tries to move (climb) and rotate to Desired values
-	SafeMoveUpdatedComponent(DesiredTickDisplacement, Climb_CalculateSurfaceAlignedRot(deltaTime), true, Hit);
+	SafeMoveUpdatedComponent(DesiredTickDisplacement, Climb_CalculateSurfaceAlignedRot(DeltaTime), true, Hit);
 	if (Hit.Time < 1.f)
 	{
 		// Unreal resolve impact and slide
-		HandleImpact(Hit, deltaTime, DesiredTickDisplacement);
+		HandleImpact(Hit, DeltaTime, DesiredTickDisplacement);
 		SlideAlongSurface(DesiredTickDisplacement, (1.f - Hit.Time), Hit.Normal, Hit, true);
 	}
 
 	// Update Final Velocity after manual-triggering Resolving
-	Velocity = (UpdatedComponent->GetComponentLocation() - OldLocation) / deltaTime;
+	Velocity = (UpdatedComponent->GetComponentLocation() - OldLocation) / DeltaTime;
 
 	// Snap movement to climbable surface
-	Climb_SnapMovementToSurfaces(deltaTime);
+	Climb_SnapMovementToSurfaces(DeltaTime);
 
 
 	// Heads to MOVE_ClimbLedge
@@ -904,10 +922,10 @@ void UDefaultMovementComponent::Auth_TryStartLedgeClimb()
 	LedgeClimb_StartLocation = UpdatedComponent->GetComponentLocation();
 	LedgeClimb_TargetLocation = LandLocation;
 	
-	const FTransform PlayerTM = UpdatedComponent->GetComponentTransform();
+	const FTransform PlayerTF = UpdatedComponent->GetComponentTransform();
 
-	const FVector StartLocal = PlayerTM.InverseTransformPosition(LedgeClimb_StartLocation);
-	const FVector LandLocal  = PlayerTM.InverseTransformPosition(LedgeClimb_TargetLocation);
+	const FVector StartLocal = PlayerTF.InverseTransformPosition(LedgeClimb_StartLocation);
+	const FVector LandLocal  = PlayerTF.InverseTransformPosition(LedgeClimb_TargetLocation);
 
 	// Keep Start local X/Y, but raise to (Land local Z + clearance) in local up axis.
 	const FVector OverLedgeLocal(
@@ -915,7 +933,7 @@ void UDefaultMovementComponent::Auth_TryStartLedgeClimb()
 		StartLocal.Y,
 		LandLocal.Z + LedgeClimb_VerticalClearance);
 
-	LedgeClimb_OverLedgeLocation = PlayerTM.TransformPosition(OverLedgeLocal);
+	LedgeClimb_OverLedgeLocation = PlayerTF.TransformPosition(OverLedgeLocal);
 
 	// Final facing: upright, looking across the top surface (the direction we travel onto it).
 	FVector HorizForward = -Climb_CurrentSurfaceNormal;
@@ -928,6 +946,21 @@ void UDefaultMovementComponent::Auth_TryStartLedgeClimb()
 	}
 	LedgeClimb_TargetRotation = FRotationMatrix::MakeFromXZ(HorizForward, FVector::UpVector).ToQuat();
 
+	// All peer uses server time as timeline source, for Ledge Climb movement prediction
+	if (AGameStateBase* GS = GetWorld() ? GetWorld()->GetGameState() : nullptr)
+	{
+		LedgeClimb_ServerStartTime = GS->GetServerWorldTimeSeconds();
+	}
+	else
+	{
+		LedgeClimb_ServerStartTime = GetWorld()->GetTimeSeconds();
+	}
+	
+	if (AActor* OwnerActor = GetOwner())
+	{
+		OwnerActor->ForceNetUpdate();
+	}
+	
 	LedgeClimb_Alpha = 0.f;
 
 	// --- Debug: draw planned path ---
@@ -950,62 +983,93 @@ void UDefaultMovementComponent::Auth_TryStartLedgeClimb()
 
 
 
-void UDefaultMovementComponent::PhysLedgeClimb(float deltaTime, int32 Iterations)
+void UDefaultMovementComponent::PhysLedgeClimb(float DeltaTime, int32 Iterations)
 {
-	if (deltaTime < MIN_TICK_TIME)
+	if (DeltaTime < MIN_TICK_TIME)
 	{
 		return;
 	}
 
+	//
+	// Skip Ledge climb until Server has announced StartTime.
+	if (!CharacterOwner->HasAuthority() && LedgeClimb_ServerStartTime < 0.f)
+	{
+		Velocity = FVector::ZeroVector;
+		return;
+	}
+	const float NowServerTime = (GetWorld() && GetWorld()->GetGameState()) ?
+		GetWorld()->GetGameState()->GetServerWorldTimeSeconds()
+		: GetWorld()->GetTimeSeconds();
+	
+
 	// normalization to duration
-	LedgeClimb_Alpha += deltaTime / FMath::Max(LedgeClimb_Duration, KINDA_SMALL_NUMBER);
-	const float ClampedAlpha = FMath::Clamp(LedgeClimb_Alpha, 0.f, 1.f);
+	const float Elapsed = FMath::Max(0.f, NowServerTime - LedgeClimb_ServerStartTime);
+	const float ClampedAlpha = FMath::Clamp(Elapsed / FMath::Max(LedgeClimb_Duration, KINDA_SMALL_NUMBER), 0.f, 1.f);
+	LedgeClimb_Alpha = ClampedAlpha;
+
 
 	// Lerp progression
 	// Segment 1 (0 .. PhaseSplit):   Start      -> OverLedge   (rise, over the edge tip)
 	// Segment 2 (PhaseSplit .. 1):   OverLedge  -> Target      (move over and settle)
 	// Interp rotation toward the upright "on top" facing in the second segment to avoid collision to the lip.
-	FQuat NewQuat;
-	FVector DesiredLocation;
+	FVector DesiredLocation = FVector::ZeroVector;
+	FQuat DesiredQuat = UpdatedComponent->GetComponentQuat();
+
 	if (ClampedAlpha <= LedgeClimb_PhaseSplit)
 	{
 		const float SegAlpha = FMath::InterpEaseOut(0.f, 1.f, ClampedAlpha / LedgeClimb_PhaseSplit, 1.2f);
-		DesiredLocation = FMath::Lerp(LedgeClimb_StartLocation, LedgeClimb_OverLedgeLocation, SegAlpha);
-
-		NewQuat = UpdatedComponent->GetComponentQuat();
+		DesiredLocation = FMath::Lerp(
+			static_cast<FVector>(LedgeClimb_StartLocation),
+			static_cast<FVector>(LedgeClimb_OverLedgeLocation),
+			SegAlpha);
 	}
 	else
 	{
-		const float SegAlpha = FMath::InterpEaseIn(0.f, 1.f, (ClampedAlpha - LedgeClimb_PhaseSplit) / (1.f - LedgeClimb_PhaseSplit), 1.2f);
-		DesiredLocation = FMath::Lerp(LedgeClimb_OverLedgeLocation, LedgeClimb_TargetLocation, SegAlpha);
+		const float SegAlpha = FMath::InterpEaseIn(0.f, 1.f,
+			(ClampedAlpha - LedgeClimb_PhaseSplit) / (1.f - LedgeClimb_PhaseSplit),1.2f);
 
-		NewQuat = FMath::QInterpTo(UpdatedComponent->GetComponentQuat(), LedgeClimb_TargetRotation, deltaTime, 5.f);
+		DesiredLocation = FMath::Lerp(
+			static_cast<FVector>(LedgeClimb_OverLedgeLocation),
+			static_cast<FVector>(LedgeClimb_TargetLocation),
+			SegAlpha);
 
+		DesiredQuat = FMath::QInterpTo(UpdatedComponent->GetComponentQuat(), LedgeClimb_TargetRotation,
+			DeltaTime,
+			5.f);
 	}
 
 	// Delta from the capsule's ACTUAL location instead of ideal math, so if a previous tick got
 	// blocked, tries to catch up next tick instead of drifting.
 	const FVector CurrentLocation = UpdatedComponent->GetComponentLocation();
-	const FVector MoveDelta = DesiredLocation - CurrentLocation;
+	const FVector ToDesired = DesiredLocation - CurrentLocation;
 
-
+	// Velocity-based step (let CMC do the correction and prediction)
+	Velocity = ToDesired / FMath::Max(DeltaTime, KINDA_SMALL_NUMBER);
+	
 	FHitResult Hit(1.f);
-	SafeMoveUpdatedComponent(MoveDelta, NewQuat, true, Hit);
+	SafeMoveUpdatedComponent(Velocity * DeltaTime, DesiredQuat, true, Hit);
 
-	// If math sends the capsule into geometry, it stops to avoid tunneling
+	// Slides if math sends the capsule into geometry
 	if (Hit.IsValidBlockingHit())
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[ClimbingMovement] PhysLedgeClimb BLOCKED at alpha %.2f by %s (normal %s)"),
 			ClampedAlpha, *GetNameSafe(Hit.GetActor()), *Hit.Normal.ToString());
+
+		SlideAlongSurface(Velocity * DeltaTime, 1.f - Hit.Time, Hit.Normal, Hit, true);
 
 		if (bClimb_DebugDraw && GetWorld())
 		{
 			DrawDebugPoint(GetWorld(), Hit.ImpactPoint, 14.f, FColor::Red, false, 2.f);
 		}
 	}
+	
+	// Done -> hand back to normal walking (capsule restore happens in OnMovementModeChanged).
+	if (LedgeClimb_Alpha >= 1.f && CharacterOwner->HasAuthority())
+	{
+		UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] LedgeClimb COMPLETE."));
+		SetMovementMode(MOVE_Walking);
+	}
 
-	// Update Velocity after manual-triggering move
-	Velocity = (UpdatedComponent->GetComponentLocation() - CurrentLocation) / deltaTime;
 
 	// --- Debug: current desired vs actual ---
 	if (bClimb_DebugDraw && GetWorld())
@@ -1015,13 +1079,6 @@ void UDefaultMovementComponent::PhysLedgeClimb(float deltaTime, int32 Iterations
 
 	UE_LOG(LogTemp, Verbose, TEXT("[ClimbingMovement] PhysLedgeClimb | alpha:%.2f desired:%s actual:%s"),
 		ClampedAlpha, *DesiredLocation.ToString(), *UpdatedComponent->GetComponentLocation().ToString());
-
-	// Done -> hand back to normal walking (capsule restore happens in OnMovementModeChanged).
-	if (LedgeClimb_Alpha >= 1.f)
-	{
-		UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] LedgeClimb COMPLETE."));
-		SetMovementMode(MOVE_Walking);
-	}
 }
 
 
