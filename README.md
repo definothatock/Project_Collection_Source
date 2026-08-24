@@ -5,5 +5,3 @@ Current Aim: a multiplayer climbing collection game.
 Current State: prototype/testbed
 
 Current includes: Sub-stepping Physics Handling, Climbing System, Rope Simulation, Segmentative Vitality System, and other minor features.
-
-Note: The main branch is usually quite far behind, in case the branches get messed up.
