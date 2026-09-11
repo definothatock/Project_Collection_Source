@@ -9,6 +9,8 @@
 
 /* ==================== Declares ==================== */
 
+class UClimbWorldStaticRopeComponent;
+
 /* ----- Generals and routing ----- */
 
 // Custom movement mode used to identify current movement state.
@@ -18,7 +20,7 @@ namespace ECustomMovementMode
 	enum Type
 	{
 		MOVE_Climb			UMETA(DisplayName = "Climb Mode"),
-		MOVE_RopeClimb     UMETA(DisplayName="Rope Climb Mode"),
+		MOVE_RopeClimb		UMETA(DisplayName="Rope Climb Mode"),
 		MOVE_ClimbLedge		UMETA(DisplayName = "Ledge Climb Mode") // mantle maneuver
 	};
 }
@@ -40,7 +42,7 @@ DECLARE_DELEGATE(FOnExitClimbState)
 
 
 
-/*
+/**
  * Custom Movement Component with climbing movement mode
  *
  * Function:
@@ -192,7 +194,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category="CustomMovement|Climbing")
 	void Request_ToggleClimbing(bool bWantsClimb);
 	
-	
+	// Attempt to attach to a specific active rope.
+	UFUNCTION(BlueprintCallable, Category="CustomMovement|Climbing")
+	void Request_StartRopeClimb(UClimbWorldStaticRopeComponent* InRope);
+	UFUNCTION(BlueprintCallable, Category="CustomMovement|Climbing")
+	void Request_StopRopeClimb();
+
+	UFUNCTION(BlueprintCallable, Category="CustomMovement|Input")
+	void Request_MoveIntent(const FVector2D& InMoveIntent);
 	
 	/* ==================== Queries ==================== */
 	
@@ -203,6 +212,10 @@ public:
 	// True while the coded ledge-climb (mantle) maneuver is running.
 	UFUNCTION(BlueprintPure, Category="CustomMovement|Climbing")
 	bool IsLedgeClimbing() const;
+
+	// True while attached to and moving around a rope.
+	UFUNCTION(BlueprintPure, Category="CustomMovement|Climbing")
+	bool IsRopeClimbing() const;
 	
 	// Gets the current velocity in local component space before component rotation is applied.
 	UFUNCTION(BlueprintPure, Category="CustomMovement|Climbing")
@@ -257,27 +270,26 @@ private:
 
 	// Call TraceFromEyeHeight() and test if there is a surface at the end of Eye Trace 
 	bool TraceLedgeTopSurface(FHitResult& OutTopSurfaceHit, FVector& OutForwardProbeEnd, bool bDrawDebug = false);
-
 	
 	/* ----- Networking ----- */
 	
 	UFUNCTION(Server, Reliable)
 	void RpcServer_ToggleClimbing(bool bEnableClimb);
-	
-	// Check Conditions; then Start or Stop Climbing accordingly.
-	UFUNCTION(BlueprintCallable, Category="CustomMovement|Climbing")
-	void Auth_ToggleClimbing(bool bEnableClimb);
 
+	UFUNCTION(Server, Reliable)
+	void RpcServer_StartRopeClimb(UClimbWorldStaticRopeComponent* InRope);
+	UFUNCTION(Server, Reliable)
+	void RpcServer_StopRopeClimb();
 	
 	/* ----- Climb Core ----- */
 	
-	// Returns true if the character is grounded and a valid climbable surface is detected.
+	UFUNCTION(BlueprintCallable, Category="CustomMovement|Climbing")
+	void Auth_ToggleClimbing(bool bEnableClimb);
+	
+	// True while grounded and valid climbable surface detected.
 	bool CanStartClimbing();
 
-	// Climbing Mode Tigger. Calls OnMovementModeChanged()
 	void StartClimbing();
-
-	// Exits climbing mode and transitions to falling.
 	void StopClimbing();
 
 	// Applies climbing movement, rotation, and surface snapping each game tick.
@@ -298,13 +310,21 @@ private:
 	// Estimate distance and pushes the character toward the climbable surface to maintain contact.
 	void Climb_SnapMovementToSurfaces(float DeltaTime);
 	
+	/* ----- CLimb Rope ----- */
 
-	/* ----- CLimb Spline ----- */
+	bool Auth_StartRopeClimb(UClimbWorldStaticRopeComponent* InRope);
+	void Auth_StopRopeClimb();
 
-	// NEW: planning to support climbing ropes.
-	// Having overhanging climb and vertical climb be the same state or?
+	void PhysRopeClimb(float DeltaTime, int32 Iterations);
 
-
+	// Retrieves a point/tangent along the current rope plus a stable radial orbit basis.
+	bool GetRopeClimbFrameAtDistance(
+		float InDistanceAlongRope,
+		FVector& OutRopeLocation,
+		FVector& OutRopeTangent,
+		FVector& OutReferenceRadial,
+		FVector& OutOrbitRight
+	) const;
 
 	/* ----- Climb Ledge ----- */
 	
@@ -326,8 +346,7 @@ private:
 	
 	// Currently not used. Might just let player falls.
 	bool CanClimbDownLedge();
-
-
+	
 	/* ----- Climb Exit ----- */
 
 	void ExitUprightBlend();
@@ -335,6 +354,8 @@ private:
 	void TickExitUprightBlend(float DeltaTime);
 	
 	/* ==================== Runtime State ==================== */
+
+	FVector2D CustomMovementInputIntent = FVector2D::ZeroVector;
 	
 	/* ----- Climb Core ----- */
 	
@@ -363,11 +384,16 @@ private:
 	double Climb_LastManualStopTime = -1.0;
 
 
-	/* ----- CLimb Spline ----- */
+	/* ----- CLimb Rope ----- */
 
+	UPROPERTY(Transient, Replicated)
+	TObjectPtr<UClimbWorldStaticRopeComponent> RopeClimb_Rope = nullptr;
 
+	UPROPERTY(Transient, Replicated)
+	float RopeClimb_DistanceAlongRope = 0.f;
 
-	
+	UPROPERTY(Transient, Replicated)
+	float RopeClimb_OrbitAngleRadians = 0.f;
 
 	/* ----- Climb Ledge ----- */
 	/*
@@ -531,6 +557,26 @@ private:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|Climbing|Debug", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
 	float Climb_ReEntryLockoutSeconds = 0.25f;
 	
+	/* ----- Climb Rope ----- */
+
+	// Maximum player-center distance from the rope at which attaching is allowed.
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|RopeClimbing", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
+	float RopeClimb_MaxAttachDistance = 125.f;
+	// Desired distance from rope centerline to the character capsule center.
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|RopeClimbing", meta=(AllowPrivateAccess="true", ClampMin="1.0"))
+	float RopeClimb_RadialAttachDistance = 55.f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|RopeClimbing", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
+	float RopeClimb_VerticalSpeed = 120.f;
+	// Degrees per second while orbiting around the rope.
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|RopeClimbing", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
+	float RopeClimb_OrbitSpeedDegrees = 60.f;
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|RopeClimbing", meta=(AllowPrivateAccess="true", ClampMin="0.0"))
+	float RopeClimb_RotationInterpSpeed = 10.f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="CustomMovement|RopeClimbing",
+		meta=(AllowPrivateAccess="true"))
+	bool bRopeClimb_FaceRope = true;
 	
 	/* ----- Climb Ledge ----- */
 

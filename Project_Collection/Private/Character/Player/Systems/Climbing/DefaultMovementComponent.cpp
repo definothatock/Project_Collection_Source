@@ -11,6 +11,8 @@
 #include "Net/UnrealNetwork.h"
 #include "GameFramework/GameStateBase.h"
 
+#include "Entity/Rope/V3/ClimbWorldStaticRopeComponent.h"
+
 #include "DrawDebugHelpers.h"
 
 
@@ -50,7 +52,6 @@ void UDefaultMovementComponent::TickComponent(float DeltaTime, ELevelTick TickTy
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 	
-	// NEW
 	TickExitUprightBlend(DeltaTime);
 }
 
@@ -64,6 +65,10 @@ void UDefaultMovementComponent::GetLifetimeReplicatedProps(TArray<FLifetimePrope
 	DOREPLIFETIME(UDefaultMovementComponent, LedgeClimb_TargetLocation);
 	DOREPLIFETIME(UDefaultMovementComponent, LedgeClimb_TargetRotation);
 	DOREPLIFETIME(UDefaultMovementComponent, LedgeClimb_ServerStartTime);
+
+	DOREPLIFETIME(UDefaultMovementComponent, RopeClimb_Rope);
+	DOREPLIFETIME(UDefaultMovementComponent, RopeClimb_DistanceAlongRope);
+	DOREPLIFETIME(UDefaultMovementComponent, RopeClimb_OrbitAngleRadians);
 }
 
 
@@ -78,7 +83,6 @@ void UDefaultMovementComponent::OnMovementModeChanged(EMovementMode PreviousMove
 	{
 		bOrientRotationToMovement = false; // make rotation driven by the surface normal
 
-		// NEW
 		Climb_TimeSinceEntered = 0.f;
 		bClimb_ExitUprightBlendActive = false;
 
@@ -103,8 +107,7 @@ void UDefaultMovementComponent::OnMovementModeChanged(EMovementMode PreviousMove
 		FVector PlaneEntryVelocity = RawEntryVelocity;
 		
 		if (!Climb_CurrentSurfaceNormal.IsNearlyZero())
-		{
-			// V - (V . N) * N, removes orthogonal component.
+		{	// V - (V . N) * N, removes orthogonal component.
 			PlaneEntryVelocity = FVector::VectorPlaneProject(RawEntryVelocity, Climb_CurrentSurfaceNormal);
 		}
 		else if (bClimb_DebugLog)
@@ -117,13 +120,11 @@ void UDefaultMovementComponent::OnMovementModeChanged(EMovementMode PreviousMove
 		{
 			PlaneEntryVelocity = PlaneEntryVelocity.GetSafeNormal() * Climb_MaxEntrySlideSpeed;
 		}
-
 		// set Velocity
 		Velocity = PlaneEntryVelocity;
 
 		// Flag sliding when faster than a normal climb by this much.
 		bClimb_IsEntrySliding = (Velocity.Size() > Climb_MaxSpeed * SlideEntryOverspeedMultiplier);
-
 		// Kill Velocity when not sliding, let player have the control
 		if (!bClimb_IsEntrySliding)
 		{
@@ -147,7 +148,23 @@ void UDefaultMovementComponent::OnMovementModeChanged(EMovementMode PreviousMove
 			const FVector Loc = UpdatedComponent->GetComponentLocation();
 			DrawDebugDirectionalArrow(GetWorld(), Loc, Loc + Velocity, 30.f, FColor::Cyan, false, 3.f, 0, 2.f);
 		}
-		
+	}
+
+	// ROPE: ENTER
+	if (IsRopeClimbing())
+	{
+		CustomMovementInputIntent = FVector2D::ZeroVector;
+
+		bOrientRotationToMovement = false;
+		// bUseControllerDesiredRotation = false;
+
+		StopMovementImmediately();
+
+		UE_LOG(LogTemp, Log,
+			TEXT("[ClimbingMovement] Entered RopeClimb | Rope=%s Distance=%.1f Orbit=%.2f"),
+			*GetNameSafe(RopeClimb_Rope.Get()),
+			RopeClimb_DistanceAlongRope,
+			RopeClimb_OrbitAngleRadians);
 	}
 
 	// CLIMB: EXIT
@@ -179,7 +196,7 @@ void UDefaultMovementComponent::OnMovementModeChanged(EMovementMode PreviousMove
 
 	// CLIMB: LEDGE
 	// makes the feet land exactly on the surface with no pop.
-	// ANCHOR: Significant overlapping with MOVE_Climb. Consider combined.
+	// ANCHOR: Significant overlapping with MOVE_Climb exit. Consider combined.
 	if (PreviousMovementMode == MOVE_Custom
 		&& PreviousCustomMode == ECustomMovementMode::MOVE_ClimbLedge)
 	{
@@ -203,6 +220,21 @@ void UDefaultMovementComponent::OnMovementModeChanged(EMovementMode PreviousMove
 		OnExit_ClimbStateDelegate.ExecuteIfBound();
 	}
 
+	// ROPE: EXIT
+	if (PreviousMovementMode == MOVE_Custom
+		&& PreviousCustomMode == ECustomMovementMode::MOVE_RopeClimb
+		&& !IsRopeClimbing())
+	{
+		CustomMovementInputIntent = FVector2D::ZeroVector;
+
+		bOrientRotationToMovement = true;
+		// bUseControllerDesiredRotation = false;
+
+		StopMovementImmediately();
+
+		UE_LOG(LogTemp, Log, TEXT("[ClimbingMovement] Exited RopeClimb."));
+	}
+
 	
 	Super::OnMovementModeChanged(PreviousMovementMode, PreviousCustomMode);
 }
@@ -213,16 +245,19 @@ void UDefaultMovementComponent::PhysCustom(float DeltaTime, int32 Iterations)
 	if (IsClimbing())
 	{
 		PhysClimb(DeltaTime, Iterations);
-
-		// NEW
 		Climb_TimeSinceEntered += DeltaTime;
-
 		return;
 	}
 	
 	if (IsLedgeClimbing())
 	{
 		PhysLedgeClimb(DeltaTime, Iterations);
+		return;
+	}
+
+	if (IsRopeClimbing())
+	{
+		PhysRopeClimb(DeltaTime, Iterations);
 		return;
 	}
 
@@ -315,6 +350,98 @@ void UDefaultMovementComponent::Request_ToggleClimbing(bool bWantsClimb)
 	Auth_ToggleClimbing(bWantsClimb);
 }
 
+void UDefaultMovementComponent::Request_StartRopeClimb(UClimbWorldStaticRopeComponent* InRope)
+{
+	if (!InRope)
+	{return;}
+
+	if (CharacterOwner && CharacterOwner->HasAuthority())
+	{
+		Auth_StartRopeClimb(InRope);
+		return;
+	}
+
+	RpcServer_StartRopeClimb(InRope);
+}
+
+void UDefaultMovementComponent::Request_StopRopeClimb()
+{
+	if (CharacterOwner && CharacterOwner->HasAuthority())
+	{
+		Auth_StopRopeClimb();
+		return;
+	}
+
+	RpcServer_StopRopeClimb();
+}
+
+void UDefaultMovementComponent::Request_MoveIntent(const FVector2D& InMoveIntent)
+{
+	CustomMovementInputIntent.X = FMath::Clamp(InMoveIntent.X, -1.f, 1.f);
+	CustomMovementInputIntent.Y = FMath::Clamp(InMoveIntent.Y, -1.f, 1.f);
+
+	if (!CharacterOwner || !UpdatedComponent)
+	{
+		return;
+	}
+
+	/*
+	 * Rope movement is interpreted directly in PhysRopeClimb():
+	 *
+	 * X = orbit around rope
+	 * Y = climb toward/away from anchor
+	 *
+	 * Do not use AddMovementInput here because it is world-space and cannot
+	 * preserve the intended rope-local axes.
+	 */
+	if (IsRopeClimbing())
+	{
+		return;
+	}
+
+	/*
+	 * Wall climbing retains your original input mapping, but it now belongs
+	 * to the CMC because it is movement-mode behavior.
+	 */
+	if (IsClimbing())
+	{
+		const FVector SurfaceNormal = GetClimbableSurfaceNormal();
+
+		const FVector ForwardDirection =
+			FVector::CrossProduct(-SurfaceNormal, CharacterOwner->GetActorRightVector());
+
+		const FVector RightDirection =
+			FVector::CrossProduct(-SurfaceNormal, -CharacterOwner->GetActorUpVector());
+
+		AddInputVector(ForwardDirection * CustomMovementInputIntent.Y);
+		AddInputVector(RightDirection * CustomMovementInputIntent.X);
+		return;
+	}
+
+	/*
+	 * Ground and air movement remain controller-yaw-relative.
+	 * This is moved from the character only to keep all movement
+	 * interpretation centralized in the movement component.
+	 */
+	const AController* Controller = CharacterOwner->GetController();
+	if (!Controller)
+	{
+		return;
+	}
+
+	const FRotator ControlRotation = Controller->GetControlRotation();
+	const FRotator YawRotation(0.f, ControlRotation.Yaw, 0.f);
+
+	const FVector ForwardDirection =
+		FRotationMatrix(YawRotation).GetUnitAxis(EAxis::X);
+
+	const FVector RightDirection =
+		FRotationMatrix(YawRotation).GetUnitAxis(EAxis::Y);
+
+	AddInputVector(ForwardDirection * CustomMovementInputIntent.Y);
+	AddInputVector(RightDirection * CustomMovementInputIntent.X);
+}
+
 
 /* ==================== Queries ==================== */
 
@@ -328,6 +455,12 @@ bool UDefaultMovementComponent::IsClimbing() const
 bool UDefaultMovementComponent::IsLedgeClimbing() const
 {
 	return MovementMode == MOVE_Custom && CustomMovementMode == ECustomMovementMode::MOVE_ClimbLedge;
+}
+
+bool UDefaultMovementComponent::IsRopeClimbing() const
+{
+	return MovementMode == MOVE_Custom
+	&& CustomMovementMode == ECustomMovementMode::MOVE_RopeClimb;
 }
 
 
@@ -480,6 +613,11 @@ bool UDefaultMovementComponent::TraceLedgeTopSurface(FHitResult& OutTopSurfaceHi
 	return OutTopSurfaceHit.bBlockingHit;
 }
 
+void UDefaultMovementComponent::RpcServer_StartRopeClimb_Implementation(UClimbWorldStaticRopeComponent* InRope)
+{
+	Auth_StartRopeClimb(InRope);
+}
+
 
 /* ----- Core ----- */
 
@@ -495,6 +633,11 @@ void UDefaultMovementComponent::RpcServer_ToggleClimbing_Implementation(bool bEn
 	Auth_ToggleClimbing(bEnableClimb);
 }
 
+
+void UDefaultMovementComponent::RpcServer_StopRopeClimb_Implementation()
+{
+	Auth_StopRopeClimb();
+}
 
 void UDefaultMovementComponent::Auth_ToggleClimbing(bool bEnableClimb)
 {
@@ -809,6 +952,300 @@ void UDefaultMovementComponent::Climb_SnapMovementToSurfaces(float DeltaTime)
 	FHitResult SnapHit(1.f);
 	SafeMoveUpdatedComponent(TickSnapAmount, UpdatedComponent->GetComponentQuat(), true, SnapHit);
 
+}
+
+bool UDefaultMovementComponent::Auth_StartRopeClimb(UClimbWorldStaticRopeComponent* InRope)
+{
+	if (!CharacterOwner || !CharacterOwner->HasAuthority() || !UpdatedComponent)
+	{return false;}
+
+	if (!InRope || InRope->GetWorld() != GetWorld() || !InRope->IsLengthFinalized())
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[ClimbingMovement] Rope attach rejected: invalid or rope not finalized."));
+		return false;
+	}
+
+	// Keep rope climbing separate from wall/ledge climbing for now; later test if the transitions are right.
+	if (IsClimbing() || IsLedgeClimbing())
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[ClimbingMovement] Rope attach rejected: player is already in wall/ledge climbing."));
+		return false;
+	}
+
+	FVector NearestLocation;
+	FVector RopeTangent;
+	float DistanceAlongRope = 0.f;
+	float DistanceToRope = 0.f;
+
+	if (!InRope->Query_FindNearestPointOnRope(
+		UpdatedComponent->GetComponentLocation(),
+		NearestLocation,
+		RopeTangent,
+		DistanceAlongRope,
+		DistanceToRope))
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[ClimbingMovement] Rope attach rejected: rope has no valid particle data."));
+		return false;
+	}
+
+	if (DistanceToRope > RopeClimb_MaxAttachDistance)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[ClimbingMovement] Rope attach rejected: player is too far from rope."));
+		return false;
+	}
+
+	RopeTangent = RopeTangent.GetSafeNormal();
+	if (RopeTangent.IsNearlyZero())
+	{return false;}
+
+	// Build a stable reference radial direction around the rope.
+	FVector ReferenceRadial = FVector::VectorPlaneProject(FVector::UpVector, RopeTangent);
+	if (!ReferenceRadial.Normalize())
+	{
+		ReferenceRadial = FVector::VectorPlaneProject(
+			UpdatedComponent->GetForwardVector(),
+			RopeTangent
+		);
+
+		if (!ReferenceRadial.Normalize())
+		{
+			ReferenceRadial = FVector::RightVector;
+		}
+	}
+
+	const FVector OrbitRight = FVector::CrossProduct(RopeTangent, ReferenceRadial).GetSafeNormal();
+
+	FVector CurrentRadial = FVector::VectorPlaneProject(
+		UpdatedComponent->GetComponentLocation() - NearestLocation,
+		RopeTangent
+	);
+
+	if (!CurrentRadial.Normalize())
+	{
+		CurrentRadial = ReferenceRadial;
+	}
+
+	RopeClimb_Rope = InRope;
+	RopeClimb_DistanceAlongRope = DistanceAlongRope;
+
+	// Store the initial orbital angle, preserving the side of the rope
+	// from which the player attached.
+	RopeClimb_OrbitAngleRadians = FMath::Atan2(
+		FVector::DotProduct(CurrentRadial, OrbitRight),
+		FVector::DotProduct(CurrentRadial, ReferenceRadial)
+	);
+
+	SetMovementMode(MOVE_Custom, ECustomMovementMode::MOVE_RopeClimb);
+
+	UE_LOG(LogTemp, Log,
+		TEXT("[ClimbingMovement] Rope attach successful | Rope=%s DistAlong=%.1f DistToRope=%.1f"),
+		*GetNameSafe(InRope),
+		RopeClimb_DistanceAlongRope,
+		DistanceToRope);
+
+	return true;
+}
+
+void UDefaultMovementComponent::Auth_StopRopeClimb()
+{
+	if (!CharacterOwner || !CharacterOwner->HasAuthority())
+	{
+		return;
+	}
+
+	if (!IsRopeClimbing())
+	{
+		return;
+	}
+	
+	RopeClimb_Rope = nullptr;
+
+	SetMovementMode(MOVE_Falling);
+}
+
+void UDefaultMovementComponent::PhysRopeClimb(float DeltaTime, int32 Iterations)
+{
+		if (DeltaTime < MIN_TICK_TIME || !UpdatedComponent)
+	{
+		return;
+	}
+
+	if (!RopeClimb_Rope || !RopeClimb_Rope->IsRopeAnchored())
+	{
+		if (CharacterOwner && CharacterOwner->HasAuthority())
+		{
+			Auth_StopRopeClimb();
+		}
+
+		return;
+	}
+
+	const float RopeLength = RopeClimb_Rope->Query_GetRuntimeArcLength();
+	if (RopeLength <= KINDA_SMALL_NUMBER)
+	{
+		if (CharacterOwner && CharacterOwner->HasAuthority())
+		{
+			Auth_StopRopeClimb();
+		}
+
+		return;
+	}
+	
+	const float VerticalIntent = CustomMovementInputIntent.Y;
+	const float OrbitIntent = CustomMovementInputIntent.X;
+
+	const float CandidateDistance = FMath::Clamp(
+		RopeClimb_DistanceAlongRope - VerticalIntent * RopeClimb_VerticalSpeed * DeltaTime,
+		0.f,
+		RopeLength
+	);
+
+	const float OrbitRadiansPerSecond = FMath::DegreesToRadians(RopeClimb_OrbitSpeedDegrees);
+
+	const float CandidateOrbitAngle = RopeClimb_OrbitAngleRadians + OrbitIntent * OrbitRadiansPerSecond * DeltaTime;
+	
+
+	FVector RopeLocation;
+	FVector RopeTangent;
+	FVector ReferenceRadial;
+	FVector OrbitRight;
+
+	if (!GetRopeClimbFrameAtDistance(
+		CandidateDistance,
+		RopeLocation,
+		RopeTangent,
+		ReferenceRadial,
+		OrbitRight))
+	{
+		if (CharacterOwner && CharacterOwner->HasAuthority())
+		{
+			Auth_StopRopeClimb();
+		}
+
+		return;
+	}
+
+	// Rotate a radial vector around the rope tangent to orbit the rope.
+	const FVector OrbitRadial = FQuat(RopeTangent, CandidateOrbitAngle)
+		.RotateVector(ReferenceRadial)
+		.GetSafeNormal();
+
+	const FVector DesiredLocation =
+		RopeLocation + OrbitRadial * RopeClimb_RadialAttachDistance;
+
+	FQuat DesiredRotation = UpdatedComponent->GetComponentQuat();
+
+	if (bRopeClimb_FaceRope)
+	{
+		/*
+		 * RopeTangent points from the anchor toward the tail.
+		 *
+		 * Make the character's capsule/body axis follow the local rope segment:
+		 * - Local Z / character Up points toward the anchor.
+		 * - Local X / character Forward faces inward toward the rope.
+		 *
+		 * This is the rope equivalent of the wall-climb surface-aligned rotation,
+		 * except the alignment axis is now the dynamically changing spline/segment
+		 * tangent rather than a wall surface normal.
+		 */
+		const FVector CharacterUpTowardAnchor = -RopeTangent;
+		const FVector CharacterForwardTowardRope = -OrbitRadial;
+
+		const FQuat TargetRopeRotation = FRotationMatrix::MakeFromXZ(
+			CharacterForwardTowardRope,
+			CharacterUpTowardAnchor
+		).ToQuat();
+
+		DesiredRotation = FMath::QInterpTo(
+			UpdatedComponent->GetComponentQuat(),
+			TargetRopeRotation,
+			DeltaTime,
+			RopeClimb_RotationInterpSpeed
+		);
+	}
+
+	const FVector OldLocation = UpdatedComponent->GetComponentLocation();
+	const FVector Delta = DesiredLocation - OldLocation;
+
+	FHitResult Hit(1.f);
+
+	// Sweep prevents wall clipping. Intentionally do not slide here:
+	// rope movement should stop when the player cannot occupy the requested
+	// orbit/vertical destination.
+	SafeMoveUpdatedComponent(Delta, DesiredRotation, true, Hit);
+
+	Velocity = (UpdatedComponent->GetComponentLocation() - OldLocation)
+		/ FMath::Max(DeltaTime, KINDA_SMALL_NUMBER);
+
+	const bool bMovementWasBlocked = Hit.IsValidBlockingHit() && Hit.Time < 0.99f;
+
+	if (!bMovementWasBlocked)
+	{
+		// Commit the new logical rope position only when the capsule actually
+		// reached it. This prevents orbit angle/distance from moving through walls.
+		RopeClimb_DistanceAlongRope = CandidateDistance;
+		RopeClimb_OrbitAngleRadians = CandidateOrbitAngle;
+	}
+	else
+	{
+		// Do not SlideAlongSurface: requirement is to stop against walls
+		// instead of allowing the player to drift around collision geometry.
+		Velocity = FVector::ZeroVector;
+
+		if (bClimb_DebugLog)
+		{
+			UE_LOG(LogTemp, Verbose,
+				TEXT("[ClimbingMovement] Rope movement blocked by %s."),
+				*GetNameSafe(Hit.GetActor()));
+		}
+	}
+}
+
+bool UDefaultMovementComponent::GetRopeClimbFrameAtDistance(float InDistanceAlongRope, FVector& OutRopeLocation,
+	FVector& OutRopeTangent, FVector& OutReferenceRadial, FVector& OutOrbitRight) const
+{
+	if (!RopeClimb_Rope)
+	{
+		return false;
+	}
+
+	if (!RopeClimb_Rope->Query_GetRopeFrameAtDistance(
+		InDistanceAlongRope,
+		OutRopeLocation,
+		OutRopeTangent))
+	{
+		return false;
+	}
+
+	OutRopeTangent = OutRopeTangent.GetSafeNormal();
+	if (OutRopeTangent.IsNearlyZero())
+	{
+		return false;
+	}
+
+	// Use world-up as the normal orbital reference when possible.
+	// If the rope is nearly vertical, world-up is parallel to its tangent,
+	// so fall back to character forward.
+	OutReferenceRadial = FVector::VectorPlaneProject(FVector::UpVector, OutRopeTangent);
+
+	if (!OutReferenceRadial.Normalize())
+	{
+		OutReferenceRadial = UpdatedComponent
+			? FVector::VectorPlaneProject(UpdatedComponent->GetForwardVector(), OutRopeTangent)
+			: FVector::RightVector;
+
+		if (!OutReferenceRadial.Normalize())
+		{
+			OutReferenceRadial = FVector::RightVector;
+		}
+	}
+
+	OutOrbitRight = FVector::CrossProduct(OutRopeTangent, OutReferenceRadial).GetSafeNormal();
+	return !OutOrbitRight.IsNearlyZero();
 }
 
 

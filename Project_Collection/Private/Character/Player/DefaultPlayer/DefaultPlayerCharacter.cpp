@@ -57,7 +57,6 @@ void ADefaultPlayerCharacter::SetupPlayerInputComponent(UInputComponent* PlayerI
 	// Jump
 	if (JumpAction)
 	{
-		// ANCHOR: have not map the IA and Mapping in Bp yet.
 		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Triggered, this, &ACharacter::Jump);
 		EnhancedInputComponent->BindAction(JumpAction, ETriggerEvent::Completed, this, &ACharacter::StopJumping);
 	}
@@ -115,6 +114,17 @@ void ADefaultPlayerCharacter::AddInputMappingContext(UInputMappingContext* Conte
 
 void ADefaultPlayerCharacter::HandleMoveInput(const FInputActionValue& Value)
 {
+	if (!DefaultMovementComponent)
+	{
+		return;
+	}
+
+	// Character forwards raw player intent only.
+	// The custom CMC decides how that intent maps in walking,
+	// wall-climb, rope-climb, or future movement modes.
+	DefaultMovementComponent->Request_MoveIntent(Value.Get<FVector2D>());
+
+	/*
 	const FVector2D MovementVector = Value.Get<FVector2D>();
 	if (!Controller) return;
 
@@ -140,6 +150,7 @@ void ADefaultPlayerCharacter::HandleMoveInput(const FInputActionValue& Value)
 
 	AddMovementInput(ForwardDirection, MovementVector.Y);
 	AddMovementInput(RightDirection, MovementVector.X);
+	*/
 }
 
 
