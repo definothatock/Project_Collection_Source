@@ -1,7 +1,12 @@
-A personal project that aims to prototype and develop interesting systems and features. 
+### Current Branch: Climb-Unstable / Climb
 
-Current Aim: a multiplayer climbing collection game.
+# A personal project that aims to prototype and develop interesting systems and features.
 
-Current State: prototype/testbed
+Current Aim: 
+A multiplayer climbing collection game.
 
-Current includes: Sub-stepping Physics Handling, Climbing System, Rope Simulation, Segmentative Vitality System, and other minor features.
+Current State: 
+prototype/testbed
+
+Current includes: 
+Sub-stepping Physics Handling, Climbing System, Rope Simulation, Segmentative Vitality System, and other minor features.
