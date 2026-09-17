@@ -1,4 +1,4 @@
-### Current Branch: Climb-Unstable / Climb
+### Current Branch: Climb-Unstable / ClimbMovement
 
 # A personal project that aims to prototype and develop interesting systems and features.
 
